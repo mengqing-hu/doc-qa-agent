@@ -19,3 +19,5 @@ test.ipynb
 __init__.py
 verify_document_parsers.py
 run.md
+
+output/
