@@ -2,6 +2,10 @@ chunking:
   chunk_size: 2000          
   chunk_overlap: 200
 
+document_parsing:
+  pdf_title_font_size_threshold: 11.0
+  pdf_page_number_offset: 10
+
 embedding:
   model_name: "BAAI/bge-large-en-v1.5"
 
