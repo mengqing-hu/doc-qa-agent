@@ -1,0 +1,27 @@
+chunking:
+  chunk_size: 2000          
+  chunk_overlap: 200
+
+embedding:
+  model_name: "BAAI/bge-large-en-v1.5"
+
+llm:
+  provider: "scadsai"
+  base_url: "https://llm.scads.ai/v1"
+  model: "meta-llama/Llama-3.3-70B-Instruct"
+
+
+retrieval:
+  bm25_top_k: 20
+  dense_top_k: 20
+  rerank_top_k: 10
+  final_top_k: 5
+  rrf_k: 60
+
+vector_store:
+  collection_name: "doc_chunks"
+  persist_dir: "data/chroma_db"
+
+logging:
+  level: "INFO"
+  log_dir: "logs"
