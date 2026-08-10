@@ -18,9 +18,14 @@ llm:
 retrieval:
   bm25_top_k: 20
   dense_top_k: 20
+  hybrid_top_k: 10
   rerank_top_k: 10
   final_top_k: 5
   rrf_k: 60
+
+reranking:
+  model_name: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  batch_size: 16
 
 vector_store:
   collection_name: "doc_chunks"
