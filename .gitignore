@@ -21,3 +21,5 @@ verify_document_parsers.py
 run.md
 
 output/
+
+test_*.py

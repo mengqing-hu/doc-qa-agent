@@ -13,6 +13,17 @@ llm:
   provider: "scadsai"
   base_url: "https://llm.scads.ai/v1"
   model: "meta-llama/Llama-3.3-70B-Instruct"
+  temperature: 0.0
+  max_tokens: 512
+
+generation:
+  prompt_path: "prompts/qa_prompt.md"
+  max_context_characters: 10000
+
+documents:
+  paths:
+    - "data/raw/HuMengqing.pdf"
+    - "data/raw/Report.docx"
 
 
 retrieval:
