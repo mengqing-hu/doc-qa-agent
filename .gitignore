@@ -13,7 +13,7 @@ __pycache__/
 .DS_Store
 models/
 docs/
-evaluation/
+# evaluation/
 
 test.ipynb
 __init__.py
@@ -23,3 +23,5 @@ run.md
 output/
 
 test_*.py
+
+*.json
