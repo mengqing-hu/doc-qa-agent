@@ -26,11 +26,14 @@ from src.retrieval.vector_store import VectorStore
 
 DEFAULT_INPUT_PATH = PROJECT_ROOT / "evaluation" / "test_queries_draft.json"
 DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "evaluation" / "test_queries.json"
-DEFAULT_CANDIDATE_TOP_K = 20
+DEFAULT_CANDIDATE_OUTPUT_PATH = (
+    PROJECT_ROOT / "evaluation" / "test_queries_candidates.json"
+)
+DEFAULT_CANDIDATE_TOP_K = 10
 
 
 def main() -> None:
-    """Build retrieval candidates and collect manual relevance labels."""
+    """Build retrieval candidates for interactive labeling or JSON review."""
     arguments = _parse_arguments()
     config = Config()
     setup_logging(config)
@@ -55,16 +58,21 @@ def main() -> None:
     hybrid_retriever = HybridRetriever(vector_store, bm25_retriever, config)
     reranker = Reranker(config) if arguments.rerank_candidates else None
 
+    output_path = _resolve_output_path(arguments)
     annotated_queries = _annotate_queries(
         queries,
         hybrid_retriever,
         reranker,
-        output_path=arguments.output,
+        output_path=output_path,
         candidate_top_k=arguments.candidate_top_k,
-        interactive=not arguments.non_interactive,
+        interactive=not (arguments.non_interactive or arguments.export_candidates),
+        include_candidates=arguments.export_candidates,
     )
-    _write_queries(arguments.output, annotated_queries)
-    print(f"Saved annotated queries to {arguments.output}")
+    _write_queries(output_path, annotated_queries)
+    saved_kind = (
+        "candidate export" if arguments.export_candidates else "annotated queries"
+    )
+    print(f"Saved {saved_kind} to {output_path}")
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -81,8 +89,8 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=DEFAULT_OUTPUT_PATH,
-        help="Annotated query file to write.",
+        default=None,
+        help="Output JSON file; uses a mode-specific default when omitted.",
     )
     parser.add_argument(
         "--candidate-top-k",
@@ -106,7 +114,24 @@ def _parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="Skip prompts and keep any existing relevant_chunk_ids values.",
     )
+    parser.add_argument(
+        "--export-candidates",
+        action="store_true",
+        help=(
+            "Write full retrieval candidates to JSON without prompting; defaults to "
+            "evaluation/test_queries_candidates.json."
+        ),
+    )
     return parser.parse_args()
+
+
+def _resolve_output_path(arguments: argparse.Namespace) -> Path:
+    """Return an explicit output path or the safe default for the selected mode."""
+    if arguments.output is not None:
+        return arguments.output
+    if arguments.export_candidates:
+        return DEFAULT_CANDIDATE_OUTPUT_PATH
+    return DEFAULT_OUTPUT_PATH
 
 
 def _load_queries(input_path: Path) -> list[dict[str, Any]]:
@@ -141,8 +166,9 @@ def _annotate_queries(
     output_path: Path,
     candidate_top_k: int,
     interactive: bool,
+    include_candidates: bool,
 ) -> list[dict[str, Any]]:
-    """Collect relevant chunk IDs for each query."""
+    """Collect relevant chunk IDs or export the candidate records for each query."""
     annotated_queries: list[dict[str, Any]] = []
     for position, query in enumerate(queries, start=1):
         query_id = str(query.get("query_id", f"query_{position:03d}"))
@@ -162,7 +188,8 @@ def _annotate_queries(
         if reranker is not None:
             candidates = reranker.rerank(query_text, candidates, top_k=candidate_top_k)
 
-        _print_candidates(candidates)
+        if interactive:
+            _print_candidates(candidates)
         relevant_chunk_ids = _resolve_relevant_chunk_ids(
             query,
             candidates,
@@ -171,10 +198,23 @@ def _annotate_queries(
 
         annotated_query = dict(query)
         annotated_query["relevant_chunk_ids"] = relevant_chunk_ids
+        if include_candidates:
+            annotated_query["retrieval_candidates"] = _serialize_candidates(candidates)
         annotated_queries.append(annotated_query)
         _write_queries(output_path, annotated_queries)
 
     return annotated_queries
+
+
+def _serialize_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the chunk ID and complete text needed for manual relevance review."""
+    return [
+        {
+            "chunk_id": str(candidate.get("chunk_id", "unknown")),
+            "text": str(candidate.get("text", "")),
+        }
+        for candidate in candidates
+    ]
 
 
 def _resolve_relevant_chunk_ids(
