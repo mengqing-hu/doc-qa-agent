@@ -29,13 +29,24 @@ documents:
 retrieval:
   bm25_top_k: 40
   dense_top_k: 40
-  hybrid_top_k: 30
+  hybrid_top_k: 10
   final_top_k: 5
   rrf_k: 60
 
+# reranking:
+#   model_name: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+#   batch_size: 16
+
 reranking:
-  model_name: "cross-encoder/ms-marco-MiniLM-L-6-v2"
-  batch_size: 16
+  provider: "scadsai"
+  model: "Qwen/Qwen3-Reranker-4B"
+  base_url: "https://llm.scads.ai/v1"
+  endpoint: "rerank"
+  timeout_seconds: 30
+  min_request_interval_seconds: 1
+  max_retries: 5
+  batch_size: 10
+  instruction: "Given a query, retrieve relevant passages that answer it."
 
 vector_store:
   collection_name: "doc_chunks"

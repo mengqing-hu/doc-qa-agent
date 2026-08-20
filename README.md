@@ -61,7 +61,7 @@ flowchart TD
 - `sentence-transformers` with `BAAI/bge-large-en-v1.5`
 - `chromadb` for persistent vector storage
 - `rank_bm25` for lexical retrieval
-- `Cross-Encoder/ms-marco-MiniLM-L-6-v2` for reranking
+- ScaDS.AI-hosted `Qwen/Qwen3-Reranker-4B` for reranking
 - OpenAI-compatible chat API via ScaDS.AI for generation
 
 ## Project Layout
@@ -96,6 +96,22 @@ HF_TOKEN=your_hugging_face_token
 ```
 
 `HF_TOKEN` is recommended for faster and more reliable model downloads.
+
+## Reranking Provider
+
+The configured ScaDS.AI reranker posts all fused candidates to
+`https://llm.scads.ai/v1/rerank` and expects a `results` list containing one
+`index` and `relevance_score` for every supplied candidate. If ScaDS.AI uses a
+different path for your account, update `reranking.endpoint` in
+`config/config.yaml`.
+
+The client waits at least `reranking.min_request_interval_seconds` between
+requests and retries rate-limited (`429`) requests up to
+`reranking.max_retries` times. It honors a numeric `Retry-After` response
+header when ScaDS.AI provides one.
+
+To return to the local MiniLM reranker, set `reranking.provider` to `local` and
+set `reranking.model` to `cross-encoder/ms-marco-MiniLM-L-6-v2`.
 
 ## Run
 
@@ -204,8 +220,9 @@ in `evaluation/test_queries/v2/test_queries.json`.
 | Hybrid RRF | 0.302 | 0.578 | 0.741 | 0.933 | 0.869 | 0.956 | 0.728 |
 | Hybrid RRF + rerank | 0.335 | 0.667 | 0.759 | 0.933 | 0.869 | 0.956 | 0.768 |
 
-Hybrid retrieval plus Cross-Encoder reranking is the best current configuration.
-Compared with the previous 2,000-character chunk baseline, it improves Hit@1
+Within this experiment, hybrid retrieval plus Cross-Encoder reranking is the
+best configuration. Compared with the previous 2,000-character chunk baseline,
+it improves Hit@1
 from 0.600 to 0.667, Hit@5 from 0.844 to 0.933, and MRR from 0.715 to 0.768.
 Hit@10 remains 0.956. Recall values should be interpreted with care because the
 two chunk configurations use different relevant-chunk labels and granularity.
@@ -235,6 +252,29 @@ lower-ranked candidates introduce distractors that the current Cross-Encoder
 does not consistently place below the labeled evidence. Future comparisons
 should use a dedicated, fixed Chroma collection to minimize approximate-index
 tie variation between runs.
+
+### Qwen3 Reranker Ablation
+
+Results are stored in
+`evaluation/results/ablation/qwen3_pool_10/comparison.json`. This is a
+controlled reranker comparison against
+`evaluation/results/ablation/rerank_pool_10/comparison.json`: both runs use
+the same V2 labels, 40 Dense candidates, 40 BM25 candidates, and 10 RRF-fused
+candidates. Their Dense-only and Hybrid RRF metrics are identical, so the
+differences below isolate the reranker.
+
+| Reranker | Recall@1 | Hit@1 | Recall@3 | Hit@3 | Recall@5 | Hit@5 | Recall@10 | Hit@10 | MRR |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| MiniLM-L-6-v2 | 0.346 | 0.689 | 0.615 | 0.889 | 0.752 | 0.956 | 0.835 | 0.956 | 0.782 |
+| Qwen3-Reranker-4B | 0.389 | 0.733 | 0.657 | 0.911 | 0.783 | 0.933 | 0.835 | 0.956 | 0.824 |
+
+Qwen3-Reranker-4B is the strongest configuration for early ranking: it
+improves Hit@1 by 0.044 and MRR by 0.042, while Recall@1, Recall@3, and
+Recall@5 also increase. Candidate recall is unchanged at Top-10 because the
+same 10 RRF candidates are reranked. Qwen3 does not strictly dominate MiniLM:
+Hit@5 declines from 0.956 to 0.933 because one query's first relevant chunk is
+moved below rank five. Use Qwen3 when first-result quality is the priority, and
+retain this Top-5 regression as a target for a larger follow-up evaluation.
 
 No-answer evaluation on the five unanswerable queries remains unchanged:
 
