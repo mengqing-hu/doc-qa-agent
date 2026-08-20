@@ -267,6 +267,15 @@ def _evaluate_retrieval_variants(
     top_ks: list[int],
 ) -> dict[str, dict[str, Any]]:
     """Evaluate V1, V2a, and V2 with the same chunks and labels."""
+    rerank_candidate_top_k = int(
+        hybrid_retriever.config.get("retrieval", "hybrid_top_k", default=30)
+    )
+    if rerank_candidate_top_k < max(top_ks):
+        raise ValueError(
+            "retrieval.hybrid_top_k must be at least the largest requested top_k "
+            "when evaluating reranked retrieval"
+        )
+
     return {
         "v1_dense": _evaluate_retrieval_variant(
             "v1_dense",
@@ -289,7 +298,7 @@ def _evaluate_retrieval_variants(
             top_ks,
             lambda query: reranker.rerank(
                 query,
-                hybrid_retriever.search(query, top_k=max(top_ks)),
+                hybrid_retriever.search(query, top_k=rerank_candidate_top_k),
                 top_k=max(top_ks),
             ),
         ),

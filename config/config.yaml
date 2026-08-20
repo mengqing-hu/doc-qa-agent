@@ -27,10 +27,9 @@ documents:
 
 
 retrieval:
-  bm25_top_k: 20
-  dense_top_k: 20
-  hybrid_top_k: 10
-  rerank_top_k: 10
+  bm25_top_k: 40
+  dense_top_k: 40
+  hybrid_top_k: 30
   final_top_k: 5
   rrf_k: 60
 

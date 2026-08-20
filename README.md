@@ -210,6 +210,32 @@ from 0.600 to 0.667, Hit@5 from 0.844 to 0.933, and MRR from 0.715 to 0.768.
 Hit@10 remains 0.956. Recall values should be interpreted with care because the
 two chunk configurations use different relevant-chunk labels and granularity.
 
+### Expanded Candidate-Pool Experiment
+
+Results are stored in `evaluation/results/v3/comparison.json`, using the same
+V2 labels. This experiment increases Dense and BM25 retrieval from 20 to 40
+candidates, keeps 30 RRF-fused candidates, and reranks those 30 candidates
+before calculating the final Top-1/3/5/10 metrics.
+
+| Variant | Recall@1 | Hit@1 | Recall@5 | Hit@5 | Recall@10 | Hit@10 | MRR |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Dense only | 0.294 | 0.556 | 0.746 | 0.956 | 0.785 | 0.956 | 0.704 |
+| Hybrid RRF | 0.313 | 0.600 | 0.741 | 0.933 | 0.835 | 0.956 | 0.736 |
+| Hybrid RRF + rerank | 0.335 | 0.667 | 0.726 | 0.911 | 0.857 | 0.956 | 0.767 |
+
+The larger candidate pool does not improve the reranked result over V2: Hit@1
+is unchanged at 0.667, MRR changes from 0.768 to 0.767, and both Recall@5 and
+Hit@5 decline. The experiment preserves Hit@10 at 0.956, so the added pool
+does not recover the two queries that lack relevant evidence in Top-10.
+
+This is a combined retrieval-depth and reranking-pool experiment, rather than
+an isolated reranking-pool ablation. The deeper Dense and BM25 candidate lists
+also change the fused RRF ordering. The decline suggests that the additional
+lower-ranked candidates introduce distractors that the current Cross-Encoder
+does not consistently place below the labeled evidence. Future comparisons
+should use a dedicated, fixed Chroma collection to minimize approximate-index
+tie variation between runs.
+
 No-answer evaluation on the five unanswerable queries remains unchanged:
 
 | Metric | Value |
