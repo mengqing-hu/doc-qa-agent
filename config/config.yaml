@@ -1,6 +1,6 @@
 chunking:
-  chunk_size: 2000          
-  chunk_overlap: 200
+  chunk_size: 1000          
+  chunk_overlap: 100
 
 document_parsing:
   pdf_title_font_size_threshold: 11.0

@@ -111,16 +111,47 @@ Annotate evaluation queries:
 .venv/bin/python -m scripts.annotate_chunks
 ```
 
-Run retrieval and rejection evaluation:
+Export candidate IDs and full text for later manual JSON annotation without terminal prompts:
 
 ```bash
-.venv/bin/python -m evaluation.evaluate
+.venv/bin/python -m scripts.annotate_chunks --export-candidates --rerank-candidates
 ```
 
-Run RAGAS evaluation for answerable queries:
+This writes `evaluation/test_queries_candidates.json`. Add selected candidate IDs
+to each query's `relevant_chunk_ids`, then use that file as `--input` for the
+evaluation commands.
+
+After annotation, remove the candidate text before saving the final evaluation
+set in place:
 
 ```bash
-.venv/bin/python -m evaluation.evaluate_ragas
+.venv/bin/python -m scripts.clean_retrieval_candidates \
+  --input evaluation/test_queries_candidates.json \
+  --in-place
+```
+
+Run retrieval and rejection evaluation with the V2 labels:
+
+```bash
+.venv/bin/python -m evaluation.evaluate \
+  --input evaluation/test_queries/v2/test_queries.json \
+  --results-dir evaluation/results/v2
+```
+
+This command writes the following files to `evaluation/results/v2/`:
+
+- `v1_dense.json`
+- `v2a_hybrid.json`
+- `v2_hybrid_rerank.json`
+- `unanswerable_rejection.json`
+- `comparison.json`
+
+Run RAGAS evaluation for the same answerable queries:
+
+```bash
+.venv/bin/python -m evaluation.evaluate_ragas \
+  --input evaluation/test_queries/v2/test_queries.json \
+  --results-dir evaluation/results/v2
 ```
 
 RAGAS uses an LLM as an evaluator through the configured OpenAI-compatible
@@ -128,18 +159,13 @@ ScaDS.AI endpoint. Start with a small sample when checking evaluator cost and
 compatibility:
 
 ```bash
-.venv/bin/python -m evaluation.evaluate_ragas --limit 5
+.venv/bin/python -m evaluation.evaluate_ragas \
+  --input evaluation/test_queries/v2/test_queries.json \
+  --results-dir evaluation/results/v2 \
+  --limit 5
 ```
 
-The evaluation command writes:
-
-- `evaluation/results/v1_dense.json`
-- `evaluation/results/v2a_hybrid.json`
-- `evaluation/results/v2_hybrid_rerank.json`
-- `evaluation/results/unanswerable_rejection.json`
-- `evaluation/results/comparison.json`
-
-The RAGAS command writes `evaluation/results/ragas_hybrid_rerank.json` with
+The RAGAS command writes `evaluation/results/v2/ragas_hybrid_rerank.json` with
 per-query and aggregate Context Precision, Context Recall, Faithfulness, and
 Factual Correctness scores. It evaluates only answerable queries; the existing
 rejection evaluation remains responsible for unanswerable queries.
@@ -151,17 +177,40 @@ The current annotated test set contains 50 queries:
 - 45 answerable queries
 - 5 unanswerable queries
 
-## V1 / V2 Comparison
+## Evaluation Results
 
-Retrieval metrics are computed on the 45 answerable queries.
+Both evaluations use 45 answerable queries. The 2,000-character baseline and
+the 1,000-character configuration use labels generated for their respective
+chunking schemes.
 
-| Variant | Recall@1 | Recall@5 | Recall@10 | MRR |
-|---|---:|---:|---:|---:|
-| V1 dense only | 0.380 | 0.696 | 0.837 | 0.652 |
-| V2a hybrid RRF | 0.309 | 0.730 | 0.874 | 0.624 |
-| V2 hybrid + rerank | 0.420 | 0.750 | 0.874 | 0.715 |
+### 2,000 / 200 Chunk Baseline
 
-No-answer evaluation on the 5 unanswerable queries:
+Results are stored in `evaluation/results/v1/comparison.json`.
+
+| Variant | Recall@1 | Hit@1 | Recall@5 | Hit@5 | Recall@10 | Hit@10 | MRR |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Dense only | 0.380 | 0.533 | 0.696 | 0.822 | 0.837 | 0.911 | 0.652 |
+| Hybrid RRF | 0.309 | 0.467 | 0.730 | 0.822 | 0.874 | 0.956 | 0.624 |
+| Hybrid RRF + rerank | 0.420 | 0.600 | 0.750 | 0.844 | 0.874 | 0.956 | 0.715 |
+
+### 1,000 / 100 Chunk Configuration
+
+Results are stored in `evaluation/results/v2/comparison.json`, using the labels
+in `evaluation/test_queries/v2/test_queries.json`.
+
+| Variant | Recall@1 | Hit@1 | Recall@5 | Hit@5 | Recall@10 | Hit@10 | MRR |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Dense only | 0.294 | 0.556 | 0.739 | 0.956 | 0.778 | 0.956 | 0.704 |
+| Hybrid RRF | 0.302 | 0.578 | 0.741 | 0.933 | 0.869 | 0.956 | 0.728 |
+| Hybrid RRF + rerank | 0.335 | 0.667 | 0.759 | 0.933 | 0.869 | 0.956 | 0.768 |
+
+Hybrid retrieval plus Cross-Encoder reranking is the best current configuration.
+Compared with the previous 2,000-character chunk baseline, it improves Hit@1
+from 0.600 to 0.667, Hit@5 from 0.844 to 0.933, and MRR from 0.715 to 0.768.
+Hit@10 remains 0.956. Recall values should be interpreted with care because the
+two chunk configurations use different relevant-chunk labels and granularity.
+
+No-answer evaluation on the five unanswerable queries remains unchanged:
 
 | Metric | Value |
 |---|---:|
@@ -170,5 +219,5 @@ No-answer evaluation on the 5 unanswerable queries:
 ## Notes
 
 - `data/chroma_db/` is created automatically when indexing runs.
-- `evaluation/test_queries.json` only stores the final labels needed for evaluation.
+- Versioned evaluation labels are stored under `evaluation/test_queries/`.
 - `evaluation/results/` contains reproducible metric snapshots for README and interview review.

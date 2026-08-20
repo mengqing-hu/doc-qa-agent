@@ -12,8 +12,8 @@ from src.core.config import Config
 
 
 logger = logging.getLogger(__name__)
-DEFAULT_CHUNK_SIZE = 2000
-DEFAULT_CHUNK_OVERLAP = 200
+DEFAULT_CHUNK_SIZE = 1000
+DEFAULT_CHUNK_OVERLAP = 100
 
 
 def chunk_sections(
