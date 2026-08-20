@@ -17,6 +17,7 @@ The goal is not just to produce answers, but to make the whole RAG pipeline meas
 - fuse and rerank candidates
 - generate grounded answers
 - evaluate retrieval and no-answer behavior
+- evaluate retrieved context and answer quality with RAGAS
 
 ## Architecture
 
@@ -116,6 +117,20 @@ Run retrieval and rejection evaluation:
 .venv/bin/python -m evaluation.evaluate
 ```
 
+Run RAGAS evaluation for answerable queries:
+
+```bash
+.venv/bin/python -m evaluation.evaluate_ragas
+```
+
+RAGAS uses an LLM as an evaluator through the configured OpenAI-compatible
+ScaDS.AI endpoint. Start with a small sample when checking evaluator cost and
+compatibility:
+
+```bash
+.venv/bin/python -m evaluation.evaluate_ragas --limit 5
+```
+
 The evaluation command writes:
 
 - `evaluation/results/v1_dense.json`
@@ -123,6 +138,11 @@ The evaluation command writes:
 - `evaluation/results/v2_hybrid_rerank.json`
 - `evaluation/results/unanswerable_rejection.json`
 - `evaluation/results/comparison.json`
+
+The RAGAS command writes `evaluation/results/ragas_hybrid_rerank.json` with
+per-query and aggregate Context Precision, Context Recall, Faithfulness, and
+Factual Correctness scores. It evaluates only answerable queries; the existing
+rejection evaluation remains responsible for unanswerable queries.
 
 ## Evaluation Data
 
