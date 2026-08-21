@@ -204,15 +204,15 @@ evaluation set:
 Use `--in-place` instead of `--output <path>` to overwrite the candidates
 file directly once you're done reviewing it.
 
-Run retrieval and rejection evaluation with the V2 labels:
+Run retrieval and rejection evaluation with the V4 labels:
 
 ```bash
 .venv/bin/python -m evaluation.evaluate \
-  --input evaluation/test_queries/v2/test_queries.json \
-  --results-dir evaluation/results/v2
+  --input evaluation/test_queries/v4/test_queries.json \
+  --results-dir evaluation/results/v4
 ```
 
-This command writes the following files to `evaluation/results/v2/`:
+This command writes the following files to `evaluation/results/v4/`:
 
 - `v1_dense.json`
 - `v2a_hybrid.json`
@@ -224,8 +224,8 @@ Run RAGAS evaluation for the same answerable queries:
 
 ```bash
 .venv/bin/python -m evaluation.evaluate_ragas \
-  --input evaluation/test_queries/v2/test_queries.json \
-  --results-dir evaluation/results/v2
+  --input evaluation/test_queries/v4/test_queries.json \
+  --results-dir evaluation/results/v4
 ```
 
 RAGAS uses an LLM as an evaluator through the configured OpenAI-compatible
@@ -234,12 +234,12 @@ compatibility:
 
 ```bash
 .venv/bin/python -m evaluation.evaluate_ragas \
-  --input evaluation/test_queries/v2/test_queries.json \
-  --results-dir evaluation/results/v2 \
+  --input evaluation/test_queries/v4/test_queries.json \
+  --results-dir evaluation/results/v4 \
   --limit 5
 ```
 
-The RAGAS command writes `evaluation/results/v2/ragas_hybrid_rerank.json` with
+The RAGAS command writes `evaluation/results/v4/ragas_hybrid_rerank.json` with
 per-query and aggregate Context Precision, Context Recall, Faithfulness, and
 Factual Correctness scores. It evaluates only answerable queries; the existing
 rejection evaluation remains responsible for unanswerable queries.
@@ -256,6 +256,38 @@ The current annotated test set contains 50 queries:
 Both evaluations use 45 answerable queries. The 2,000-character baseline and
 the 1,000-character configuration use labels generated for their respective
 chunking schemes.
+
+### Current V4 Results
+
+Results are stored in `evaluation/results/v4/comparison.json`, using the labels
+in `evaluation/test_queries/v4/test_queries.json`.
+
+V4 evaluates the current parser and chunking pipeline. Its labels were
+annotated against the chunks produced by this pipeline:
+
+- PDF parsing uses MinerU Markdown to preserve document structure, formulas,
+  and tables, then maps sections back to physical PDF pages where possible.
+- Word parsing processes paragraphs and tables in document order, carries the
+  heading path into text and table content, and associates captions with their
+  data tables.
+- Retrieval filtering removes front matter, tables of contents, references,
+  appendices, headers and footers, and footnotes before indexing.
+- Text sections use recursive 1,000-character chunks with 100-character
+  overlap; tables remain intact as single chunks to preserve row and column
+  relationships. Every chunk retains source, page, section-title, type, and
+  stable-ID metadata for retrieval and citation.
+
+| Variant | Recall@1 | Hit@1 | Recall@5 | Hit@5 | Recall@10 | Hit@10 | MRR |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Dense only | 0.256 | 0.511 | 0.667 | 0.844 | 0.811 | 0.956 | 0.639 |
+| Hybrid RRF | 0.315 | 0.600 | 0.759 | 0.956 | 0.896 | 0.978 | 0.754 |
+| Hybrid RRF + rerank | 0.354 | 0.667 | 0.854 | 0.978 | 0.896 | 0.978 | 0.806 |
+
+Hybrid retrieval improves over dense-only retrieval at every reported cutoff.
+Reranking then provides the strongest early ranking and the best overall MRR:
+Hit@1 rises from 0.600 to 0.667 and MRR from 0.754 to 0.806. The reranked and
+non-reranked hybrid pipelines share the same Top-10 candidate recall and
+Hit@10 because reranking changes only their ordering.
 
 ### 2,000 / 200 Chunk Baseline
 
@@ -334,11 +366,15 @@ Hit@5 declines from 0.956 to 0.933 because one query's first relevant chunk is
 moved below rank five. Use Qwen3 when first-result quality is the priority, and
 retain this Top-5 regression as a target for a larger follow-up evaluation.
 
-No-answer evaluation on the five unanswerable queries remains unchanged:
+V4 no-answer evaluation covers five unanswerable queries. The pipeline refused
+four, completed all requests without evaluation failures, and achieved 0.800
+rejection accuracy:
 
 | Metric | Value |
 |---|---:|
 | Rejection accuracy | 0.800 |
+| Refused queries | 4 / 5 |
+| Evaluation failures | 0 |
 
 ## Notes
 
