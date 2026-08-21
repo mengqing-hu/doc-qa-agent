@@ -58,7 +58,7 @@ flowchart TD
 - MinerU API for PDF parsing, table extraction, and formula-to-LaTeX conversion
 - `python-docx` for Word parsing
 - `langchain-text-splitters` for chunking
-- `sentence-transformers` with `BAAI/bge-large-en-v1.5`
+- ScaDS.AI-hosted `Qwen/Qwen3-Embedding-4B` for embedding (local `sentence-transformers` with `BAAI/bge-large-en-v1.5` also supported)
 - `chromadb` for persistent vector storage
 - `rank_bm25` for lexical retrieval
 - ScaDS.AI-hosted `Qwen/Qwen3-Reranker-4B` for reranking
@@ -118,6 +118,29 @@ a clear error.
 
 Word OMML equations are independently converted to inline LaTeX while parsing,
 so expressions such as `x_i` and fractions remain searchable.
+
+## Embedding Provider
+
+`embedding.provider` selects between two embedding backends, mirroring the
+`local`/`scadsai` switch used for reranking:
+
+- `scadsai` (default): calls ScaDS.AI's OpenAI-compatible `/embeddings`
+  endpoint (`embedding.base_url`, default `https://llm.scads.ai/v1`) with
+  `embedding.model_name` (default `Qwen/Qwen3-Embedding-4B`) through the same
+  `openai` client used by `LLM`. Vectors are L2-normalized locally after the
+  request so distances stay comparable to the local provider's output.
+- `local`: loads a `sentence-transformers` model (`embedding.model_name`,
+  default `BAAI/bge-large-en-v1.5`) and encodes with `normalize_embeddings=True`.
+
+Switching `embedding.provider` or `embedding.model_name` changes the vector
+dimension, so it also changes what a Chroma collection can hold. Pick a new
+`vector_store.collection_name` whenever you switch embedding models — reusing
+the old name upserts incompatible-dimension vectors into an existing
+collection and fails. The current default collection is
+`doc_chunks_qwen3_embed`; the earlier `doc_chunks` collection (built with
+`BAAI/bge-large-en-v1.5`) is left untouched on disk, so reverting
+`embedding.provider` to `local` and `vector_store.collection_name` to
+`doc_chunks` restores the previous index without re-embedding.
 
 ## Reranking Provider
 
@@ -318,6 +341,55 @@ result, the Hit@5/Hit@10 gains matter more for answer quality than the small
 Recall@1 regression. MiniLM's negative result for pool expansion does not
 generalize to Qwen3-Reranker-4B; `config/config.yaml` now keeps
 `hybrid_top_k: 30` as the default based on this comparison.
+
+### Qwen3-Embedding-4B Experiment (V4)
+
+Results are stored in `evaluation/results/v4_qwen3_embed/comparison.json`,
+using the same V4 labels. This isolates the embedding model:
+`retrieval.hybrid_top_k` stays at 30 and Qwen3-Reranker-4B is unchanged; only
+`embedding.provider`/`embedding.model_name` switch from the local
+`BAAI/bge-large-en-v1.5` (via `sentence-transformers`) to ScaDS.AI-hosted
+`Qwen/Qwen3-Embedding-4B` (via the OpenAI-compatible `/embeddings` endpoint,
+see "Embedding Provider" above). Switching embedding models changes the
+vector dimension, so `vector_store.collection_name` was also changed to
+`doc_chunks_qwen3_embed` to avoid mixing incompatible vectors into the
+existing collection.
+
+| Variant | Recall@1 | Hit@1 | Recall@5 | Hit@5 | Recall@10 | Hit@10 | MRR |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Dense only (bge-large-en-v1.5) | 0.256 | 0.511 | 0.667 | 0.844 | 0.811 | 0.956 | 0.639 |
+| Dense only (Qwen3-Embedding-4B) | 0.269 | 0.489 | 0.778 | 0.933 | 0.893 | 0.956 | 0.671 |
+| Hybrid RRF (bge-large-en-v1.5) | 0.315 | 0.600 | 0.759 | 0.956 | 0.896 | 0.978 | 0.754 |
+| Hybrid RRF (Qwen3-Embedding-4B) | 0.359 | 0.711 | 0.767 | 0.956 | 0.911 | 0.956 | 0.808 |
+| Hybrid RRF + rerank (bge-large-en-v1.5, pool 30) | 0.346 | 0.644 | 0.856 | 1.000 | 0.969 | 1.000 | 0.798 |
+| Hybrid RRF + rerank (Qwen3-Embedding-4B, pool 30) | 0.346 | 0.644 | 0.807 | 0.956 | 0.933 | 0.978 | 0.780 |
+
+Qwen3-Embedding-4B is a clearly stronger embedding model on its own:
+dense-only Recall@5, Hit@5, and Recall@10 all improve substantially (+0.111,
++0.089, +0.081), and MRR rises from 0.639 to 0.671. The pre-rerank Hybrid RRF
+stage improves further, most notably Hit@1 (+0.111) and MRR (+0.054).
+
+After Qwen3-Reranker-4B reranks the now-different 30-candidate pool, the
+final metrics come out slightly below the bge-large-en-v1.5 baseline: Hit@5
+drops from a perfect 1.000 to 0.956, and Recall@5/Recall@10/MRR each fall by
+0.02–0.05. Per-query inspection shows this is not a uniform regression — some
+queries move up in rank while others move down — consistent with the same
+effect seen in the "Expanded Candidate-Pool Experiment": a stronger dense
+signal changes which distractors enter the RRF-fused pool, and the
+reranker's optimal pool size is coupled to the embedding model rather than a
+fixed constant. `hybrid_top_k` was tuned (10 → 30) against the previous
+embedding and has not been re-swept for Qwen3-Embedding-4B.
+
+Rejection accuracy improved from 0.800 to a perfect 1.000 (5/5): the query
+that previously failed (the model over-generalized a tangential passage
+about OCT's general defect-detection capability to the study's binary
+classifier) is now correctly refused, likely because the new embedding
+retrieves a different, less misleading candidate set for that query.
+
+Given the clear dense-retrieval gains and the rejection-accuracy improvement
+— at the cost of a small, non-uniform dip in the final reranked Top-5
+metrics that a `hybrid_top_k` re-sweep may recover — Qwen3-Embedding-4B
+(`embedding.provider: scadsai`) is now the default in `config/config.yaml`.
 
 ### 2,000 / 200 Chunk Baseline
 
