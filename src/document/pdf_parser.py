@@ -40,6 +40,7 @@ MARKDOWN_TABLE_DIVIDER_PATTERN = re.compile(
 HTML_TABLE_START_PATTERN = re.compile(r"^\s*<table\b", re.IGNORECASE)
 HTML_TABLE_OPEN_PATTERN = re.compile(r"<table\b", re.IGNORECASE)
 HTML_TABLE_CLOSE_PATTERN = re.compile(r"</table>", re.IGNORECASE)
+IMAGE_LINE_PATTERN = re.compile(r"^!\[(?P<caption>.*)\]\([^)]*\)$")
 PAGE_MARKER_PATTERN = re.compile(
     r"^\s*<!--\s*(?P<label>page(?:[\s_-]*(?:number|idx))?)\s*[:=_-]?\s*(?P<number>\d+)\s*-->\s*$",
     re.IGNORECASE,
@@ -465,9 +466,16 @@ def _parse_mineru_markdown(markdown: str, source_name: str) -> list[dict[str, An
                     section_page = current_page
             line_index += 1
             continue
-        if not line or _is_noise_line(line) or _is_image_line(line):
+        if not line or _is_noise_line(line):
             if line:
                 current_lines.append(line)
+            line_index += 1
+            continue
+
+        image_caption = _image_line_caption(line)
+        if image_caption is not None:
+            if image_caption:
+                current_lines.append(image_caption)
             line_index += 1
             continue
 
@@ -686,6 +694,9 @@ def _is_noise_line(text: str) -> bool:
     )
 
 
-def _is_image_line(text: str) -> bool:
-    """Exclude standalone image references from the text retrieval index."""
-    return text.startswith("![") and text.endswith(")")
+def _image_line_caption(text: str) -> str | None:
+    """Return a standalone image line's caption, or None if not an image line."""
+    match = IMAGE_LINE_PATTERN.fullmatch(text)
+    if match is None:
+        return None
+    return _normalize_markdown_text(match.group("caption"))
