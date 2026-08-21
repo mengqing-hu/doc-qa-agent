@@ -289,6 +289,36 @@ Hit@1 rises from 0.600 to 0.667 and MRR from 0.754 to 0.806. The reranked and
 non-reranked hybrid pipelines share the same Top-10 candidate recall and
 Hit@10 because reranking changes only their ordering.
 
+### Qwen3 Candidate-Pool Experiment (V4)
+
+Results are stored in `evaluation/results/v4_pool30/comparison.json`, using
+the same V4 labels as the baseline above. This repeats the "Expanded
+Candidate-Pool Experiment" design (below) with the current default reranker:
+`bm25_top_k` and `dense_top_k` stay at 40, and `retrieval.hybrid_top_k` in
+`config/config.yaml` is raised from 10 to 30, so Qwen3-Reranker-4B reorders
+30 RRF-fused candidates instead of 10 before the Top-1/3/5/10 metrics are
+computed. `v1_dense` and `v2a_hybrid` are computed independently of this
+setting and are therefore identical to the V4 baseline.
+
+| Variant | Recall@1 | Hit@1 | Recall@5 | Hit@5 | Recall@10 | Hit@10 | MRR |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Hybrid RRF + rerank (pool 10, baseline) | 0.354 | 0.667 | 0.854 | 0.978 | 0.896 | 0.978 | 0.806 |
+| Hybrid RRF + rerank (pool 30) | 0.346 | 0.644 | 0.856 | 1.000 | 0.969 | 1.000 | 0.798 |
+
+The earlier "Expanded Candidate-Pool Experiment" used the pre-Qwen3 default
+reranker (MiniLM-L-6-v2) and found that a larger candidate pool *hurt*
+Recall@5 and Hit@5 after reranking. Repeating the same pool expansion with
+Qwen3-Reranker-4B shows the opposite: Hit@5 and Hit@10 both reach a perfect
+1.000 (up from 0.978), and Recall@10 rises from 0.896 to 0.969. The
+regression is confined to the top of the ranking — Recall@1, Hit@1, and MRR
+each drop slightly (by 0.007–0.023) as a few queries' best chunk is reordered
+from rank 1 to rank 2, not dropped from the results. Since the deployed
+pipeline sends `final_top_k = 5` chunks to the LLM rather than only the top
+result, the Hit@5/Hit@10 gains matter more for answer quality than the small
+Recall@1 regression. MiniLM's negative result for pool expansion does not
+generalize to Qwen3-Reranker-4B; `config/config.yaml` now keeps
+`hybrid_top_k: 30` as the default based on this comparison.
+
 ### 2,000 / 200 Chunk Baseline
 
 Results are stored in `evaluation/results/v1/comparison.json`.
