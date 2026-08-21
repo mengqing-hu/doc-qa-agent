@@ -55,7 +55,7 @@ flowchart TD
 ## Tech Stack
 
 - Python 3.11+
-- `pdfplumber` for PDF parsing
+- MinerU API for PDF parsing, table extraction, and formula-to-LaTeX conversion
 - `python-docx` for Word parsing
 - `langchain-text-splitters` for chunking
 - `sentence-transformers` with `BAAI/bge-large-en-v1.5`
@@ -85,7 +85,7 @@ Create a virtual environment and install the runtime dependencies:
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install pdfplumber python-docx langchain-text-splitters sentence-transformers chromadb rank_bm25 openai python-dotenv pyyaml
+.venv/bin/pip install python-docx langchain-text-splitters sentence-transformers chromadb rank_bm25 openai python-dotenv pyyaml
 ```
 
 Create a `.env` file with at least:
@@ -93,9 +93,31 @@ Create a `.env` file with at least:
 ```bash
 SCADS_API_KEY=your_scads_api_key
 HF_TOKEN=your_hugging_face_token
+MINERU_API_TOKEN=your_mineru_api_token
 ```
 
 `HF_TOKEN` is recommended for faster and more reliable model downloads.
+
+## PDF Parsing With MinerU
+
+PDF ingestion uses the official MinerU cloud API. Set `MINERU_API_TOKEN` in
+`.env`; the parser requests a pre-signed upload URL, uploads the PDF, submits
+an asynchronous extraction task, polls for completion, and downloads the
+resulting Markdown archive. The token is read at runtime and is never stored
+in `config/config.yaml`.
+
+MinerU receives the PDF content. Review its service terms and your project's
+data-handling requirements before parsing sensitive documents. Configure the
+cloud endpoint, model version, OCR option, and timeouts under
+`document_parsing.mineru` in `config/config.yaml`.
+
+MinerU output preserves formulas as LaTeX and tables as Markdown or HTML; the
+parser converts it into the existing ordered text/table section format. There
+is no `pdfplumber` fallback: a MinerU request failure stops PDF ingestion with
+a clear error.
+
+Word OMML equations are independently converted to inline LaTeX while parsing,
+so expressions such as `x_i` and fractions remain searchable.
 
 ## Reranking Provider
 

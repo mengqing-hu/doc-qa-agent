@@ -15,6 +15,8 @@ from docx.opc.exceptions import PackageNotFoundError
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
+from src.document.formula import extract_paragraph_text, extract_table_cell_text
+
 
 logger = logging.getLogger(__name__)
 INTRODUCTION_TITLE = "Introduction"
@@ -28,11 +30,12 @@ NON_RETRIEVABLE_HEADING_PATTERN = re.compile(
     re.IGNORECASE,
 )
 NUMBER_PLACEHOLDER_PATTERN = re.compile(r"%(\d+)")
-ABSTRACT_HEADING_PATTERN = re.compile(r"^abstract$", re.IGNORECASE)
+ABSTRACT_HEADING_PATTERN = re.compile(r"^(?:abstract|zusammenfassung)$", re.IGNORECASE)
 REFERENCES_HEADING_PATTERN = re.compile(
     r"^(?:\d+(?:\.\d+)*\s+)?(?:references|bibliography|literaturverzeichnis)$",
     re.IGNORECASE,
 )
+TOC_ENTRY_PATTERN = re.compile(r".+(?:\.{3,}|…{2,}|·{3,})\s*\d+\s*$", re.IGNORECASE)
 
 
 def parse_word_document(document_path: str | Path) -> list[dict[str, Any]]:
@@ -77,37 +80,36 @@ def _parse_document_body(
     heading_path: list[str] = []
     current_paragraphs: list[str] = []
     pending_table_caption: str | None = None
+    current_kind = "front_matter"
     content_started = False
-    content_ended = False
 
     for body_element in document.element.body.iterchildren():
         if body_element.tag.endswith("}p"):
             paragraph = Paragraph(body_element, document)
-            paragraph_text = paragraph.text.strip()
+            paragraph_text = extract_paragraph_text(paragraph)
             if not paragraph_text:
                 continue
 
-            if _is_non_retrievable_paragraph(paragraph):
+            if _is_toc_style_paragraph(paragraph) or (
+                current_kind in {"front_matter", "abstract"} and _is_toc_entry(paragraph_text)
+            ):
+                if current_kind != "toc":
+                    _append_text_section(
+                        sections,
+                        current_title,
+                        current_paragraphs,
+                        source_name,
+                        heading_level=current_heading_level,
+                        heading_path=heading_path,
+                        section_kind=current_kind,
+                    )
+                    current_paragraphs = []
+                    current_title = "Contents"
+                    current_kind = "toc"
+                current_paragraphs.append(paragraph_text)
                 continue
 
             is_abstract_heading = _is_abstract_heading(paragraph_text)
-            if not content_started:
-                if not is_abstract_heading:
-                    continue
-                content_started = True
-
-            if _is_references_heading(paragraph_text):
-                _append_text_section(
-                    sections,
-                    current_title,
-                    current_paragraphs,
-                    source_name,
-                    heading_level=current_heading_level,
-                    heading_path=heading_path,
-                )
-                content_ended = True
-                break
-
             heading_level = _heading_level(paragraph)
             if heading_level is not None or is_abstract_heading:
                 _append_text_section(
@@ -117,11 +119,10 @@ def _parse_document_body(
                     source_name,
                     heading_level=current_heading_level,
                     heading_path=heading_path,
+                    section_kind=current_kind,
                 )
                 current_paragraphs = []
                 pending_table_caption = None
-                if NON_RETRIEVABLE_HEADING_PATTERN.fullmatch(paragraph_text):
-                    continue
 
                 resolved_heading_level = heading_level or 1
                 heading_number = (
@@ -135,6 +136,14 @@ def _parse_document_body(
                 )
                 current_title = displayed_heading
                 current_heading_level = resolved_heading_level
+                heading_kind = _classify_section_kind(paragraph_text)
+                if heading_kind == "body" and current_kind in {"references", "appendix"}:
+                    heading_kind = current_kind
+                current_kind = heading_kind
+                if _is_abstract_heading(paragraph_text):
+                    content_started = True
+                elif not content_started and current_kind == "body":
+                    current_kind = "front_matter"
                 continue
 
             # Remember a caption only for the following data table
@@ -152,19 +161,7 @@ def _parse_document_body(
         if not body_element.tag.endswith("}tbl"):
             continue
 
-        if not content_started:
-            continue
-
         table = Table(body_element, document)
-
-        # Skip layout tables used for formulas and visual alignment
-        if len(table.rows) <= 2 or len(table.columns) <= 1:
-            logger.debug(
-                "Skipped layout table with %d row(s) and %d column(s)",
-                len(table.rows),
-                len(table.columns),
-            )
-            continue
 
         _append_text_section(
             sections,
@@ -173,6 +170,7 @@ def _parse_document_body(
             source_name,
             heading_level=current_heading_level,
             heading_path=heading_path,
+            section_kind=current_kind,
         )
         current_paragraphs = []
         table_number = sum(section["type"] == "table" for section in sections) + 1
@@ -188,6 +186,7 @@ def _parse_document_body(
                 "heading_level": current_heading_level,
                 "heading_path": " > ".join(heading_path),
                 "heading_number": _heading_number_from_title(current_title),
+                "section_kind": current_kind,
             }
         )
         pending_table_caption = None
@@ -195,13 +194,12 @@ def _parse_document_body(
     _append_text_section(
         sections,
         current_title,
-        current_paragraphs if not content_ended else [],
+        current_paragraphs,
         source_name,
         heading_level=current_heading_level,
         heading_path=heading_path,
+        section_kind=current_kind,
     )
-    if not content_started:
-        logger.warning("No Abstract heading was found; no Word sections were retained")
     return sections
 
 
@@ -213,6 +211,7 @@ def _append_text_section(
     *,
     heading_level: int,
     heading_path: list[str],
+    section_kind: str,
 ) -> None:
     """Append a text section only when it contains paragraph content."""
     if not paragraphs:
@@ -227,13 +226,33 @@ def _append_text_section(
             "heading_level": heading_level,
             "heading_path": " > ".join(heading_path),
             "heading_number": _heading_number_from_title(title),
+            "section_kind": section_kind,
         }
     )
 
 
-def _is_non_retrievable_paragraph(paragraph: Paragraph) -> bool:
-    """Return whether a paragraph belongs to a generated Word contents list."""
+def _is_toc_style_paragraph(paragraph: Paragraph) -> bool:
+    """Return whether a paragraph uses a generated Word contents style."""
     return bool(TOC_STYLE_PATTERN.fullmatch(paragraph.style.name.strip()))
+
+
+def _is_toc_entry(text: str) -> bool:
+    """Return whether a line looks like a manually typed contents entry."""
+    return bool(TOC_ENTRY_PATTERN.fullmatch(text.strip()))
+
+
+def _classify_section_kind(text: str) -> str:
+    """Classify a heading without removing its content from parsed sections."""
+    normalized_text = text.strip()
+    if NON_RETRIEVABLE_HEADING_PATTERN.fullmatch(normalized_text):
+        return "toc"
+    if _is_references_heading(normalized_text):
+        return "references"
+    if re.match(r"^(?:\d+(?:\.\d+)*\s+)?(?:appendix|annex|anhang)\b", normalized_text, re.IGNORECASE):
+        return "appendix"
+    if _is_abstract_heading(normalized_text):
+        return "abstract"
+    return "body"
 
 
 def _is_abstract_heading(text: str) -> bool:
@@ -425,7 +444,7 @@ def _numbering_id_from_properties(properties: Any) -> str | None:
 def _table_to_markdown(table: Table) -> str:
     """Convert a Word table into Markdown while preserving row boundaries."""
     rows = [
-        [_normalize_cell_text(cell.text) for cell in row.cells]
+        [_normalize_cell_text(extract_table_cell_text(cell)) for cell in row.cells]
         for row in table.rows
     ]
     if not rows or not rows[0]:

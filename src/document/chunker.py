@@ -14,13 +14,62 @@ from src.core.config import Config
 logger = logging.getLogger(__name__)
 DEFAULT_CHUNK_SIZE = 1000
 DEFAULT_CHUNK_OVERLAP = 100
+DEFAULT_EXCLUDED_SECTION_KINDS = (
+    "front_matter",
+    "toc",
+    "references",
+    "appendix",
+    "header_footer",
+    "footnote",
+)
+
+
+def prepare_chunks(
+    sections: Sequence[Mapping[str, Any]],
+    config: Config | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Filter parsed sections and create retrieval chunks from the survivors."""
+    chunking_config = config if config is not None else Config()
+    filtered_sections = filter_sections(sections, chunking_config)
+    chunks = _chunk_filtered_sections(filtered_sections, chunking_config)
+    return filtered_sections, chunks
+
+
+def filter_sections(
+    sections: Sequence[Mapping[str, Any]],
+    config: Config | None = None,
+) -> list[dict[str, Any]]:
+    """Apply configured retrieval filters without mutating the parsed sections."""
+    chunking_config = config if config is not None else Config()
+    configured_kinds = chunking_config.get(
+        "chunking",
+        "filters",
+        "exclude_section_kinds",
+        default=DEFAULT_EXCLUDED_SECTION_KINDS,
+    )
+    if not isinstance(configured_kinds, (list, tuple, set)):
+        raise ValueError("chunking.filters.exclude_section_kinds must be a sequence")
+    excluded_kinds = {str(kind).strip().casefold() for kind in configured_kinds}
+    filtered_sections: list[dict[str, Any]] = []
+    for section in sections:
+        section_copy = dict(section)
+        section_kind = str(section_copy.get("section_kind", "body")).casefold()
+        if section_kind in excluded_kinds:
+            continue
+        filtered_sections.append(section_copy)
+    logger.info(
+        "Retained %d of %d parsed section(s) for retrieval",
+        len(filtered_sections),
+        len(sections),
+    )
+    return filtered_sections
 
 
 def chunk_sections(
     sections: Sequence[Mapping[str, Any]],
     config: Config | None = None,
 ) -> list[dict[str, Any]]:
-    """Split parsed sections into chunks with retrieval metadata.
+    """Filter parsed sections and split survivors into chunks with metadata.
 
     Args:
         sections: Sections returned by a document parser.
@@ -30,6 +79,15 @@ def chunk_sections(
         Chunks containing content, source metadata, and a stable chunk ID.
     """
     chunking_config = config if config is not None else Config()
+    filtered_sections = filter_sections(sections, chunking_config)
+    return _chunk_filtered_sections(filtered_sections, chunking_config)
+
+
+def _chunk_filtered_sections(
+    sections: Sequence[Mapping[str, Any]],
+    chunking_config: Config,
+) -> list[dict[str, Any]]:
+    """Split already-filtered sections into indexable chunks."""
     chunk_size = int(
         chunking_config.get(
             "chunking", "chunk_size", default=DEFAULT_CHUNK_SIZE

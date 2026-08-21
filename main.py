@@ -7,7 +7,7 @@ from pathlib import Path
 
 from src.core.config import PROJECT_ROOT, Config
 from src.core.logger import setup_logging
-from src.document.chunker import chunk_sections
+from src.document.chunker import prepare_chunks
 from src.document.pdf_parser import parse_pdf_document
 from src.document.word_parser import parse_word_document
 from src.generation.llm import LLM
@@ -45,7 +45,7 @@ def _parse_arguments() -> argparse.Namespace:
 
 def _build_pipeline(config: Config) -> RAGPipeline:
     """Parse configured documents and assemble the online RAG components."""
-    chunks = chunk_sections(_parse_documents(config), config)
+    _, chunks = prepare_chunks(_parse_documents(config), config)
     embedder = Embedder(config)
     vector_store = VectorStore(config, embedder=embedder)
     vector_store.add_chunks(chunks)
