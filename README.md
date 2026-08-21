@@ -149,24 +149,60 @@ Annotate evaluation queries:
 .venv/bin/python -m scripts.annotate_chunks
 ```
 
-Export candidate IDs and full text for later manual JSON annotation without terminal prompts:
+By default this reads `evaluation/test_queries_draft.json` and writes
+`evaluation/test_queries.json`. Every draft file re-parses and re-chunks the
+documents configured under `documents.paths` in `config/config.yaml`, so
+whenever the parsing or chunking logic changes (chunk size, section
+filtering, etc.), any previously annotated `relevant_chunk_ids` values refer
+to stale chunk IDs and the affected query set must be re-annotated against
+the new chunks. For a versioned query set (e.g. a fresh draft created after a
+chunking change), pass explicit `--input`/`--output` paths under
+`evaluation/test_queries/<version>/` instead of relying on the defaults:
 
 ```bash
-.venv/bin/python -m scripts.annotate_chunks --export-candidates --rerank-candidates
+.venv/bin/python -m scripts.annotate_chunks \
+  --input evaluation/test_queries/v4/test_queries_draft.json \
+  --output evaluation/test_queries/v4/test_queries.json \
+  --rerank-candidates
 ```
 
-This writes `evaluation/test_queries_candidates.json`. Add selected candidate IDs
-to each query's `relevant_chunk_ids`, then use that file as `--input` for the
-evaluation commands.
+This mode is interactive: for each query it prints the query, the reference
+answer, and the top `--candidate-top-k` (default 10) hybrid-retrieved
+candidates (add `--rerank-candidates` to rerank them with the Cross-Encoder
+first), then prompts for the relevant chunk ID(s) or candidate rank number(s)
+(comma-separated). Press Enter to keep any existing `relevant_chunk_ids`,
+`s` to skip a query, or `q` to quit — progress is written to `--output` after
+every query, so an interrupted run resumes where it left off (re-running the
+same command skips nothing but lets you leave existing answers unless you
+overwrite them).
 
-After annotation, remove the candidate text before saving the final evaluation
-set in place:
+For a query set too large to annotate one prompt at a time, export the full
+candidate list per query to JSON instead, without any terminal prompts:
+
+```bash
+.venv/bin/python -m scripts.annotate_chunks \
+  --input evaluation/test_queries/v4/test_queries_draft.json \
+  --output evaluation/test_queries/v4/test_queries_candidates.json \
+  --export-candidates --rerank-candidates
+```
+
+Each query record gains a `retrieval_candidates` field (chunk ID + full text
+for every retrieved candidate). Open the file, read each query's candidates,
+and fill in `relevant_chunk_ids` by hand (or with LLM assistance) using the
+chunk IDs shown. Increase `--candidate-top-k` if you suspect the correct
+chunk falls outside the default top 10.
+
+After annotation, remove the candidate text before saving the final
+evaluation set:
 
 ```bash
 .venv/bin/python -m scripts.clean_retrieval_candidates \
-  --input evaluation/test_queries_candidates.json \
-  --in-place
+  --input evaluation/test_queries/v4/test_queries_candidates.json \
+  --output evaluation/test_queries/v4/test_queries.json
 ```
+
+Use `--in-place` instead of `--output <path>` to overwrite the candidates
+file directly once you're done reviewing it.
 
 Run retrieval and rejection evaluation with the V2 labels:
 
