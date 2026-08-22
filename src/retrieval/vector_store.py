@@ -91,6 +91,17 @@ class VectorStore:
         )
         return _format_query_results(query_result)
 
+    def load_chunks(self) -> list[dict[str, Any]]:
+        """Load all indexed chunks so BM25 can be rebuilt without re-ingestion."""
+        result = self.collection.get(include=["documents", "metadatas"])
+        chunks = _format_collection_records(result)
+        logger.info(
+            "Loaded %d indexed chunk(s) from collection %s",
+            len(chunks),
+            self.collection.name,
+        )
+        return chunks
+
 
 def _chroma_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     """Keep only scalar metadata values accepted by Chroma."""
@@ -120,6 +131,21 @@ def _format_query_results(result: Mapping[str, Any]) -> list[dict[str, Any]]:
             "text": documents[index],
             "metadata": metadatas[index] or {},
             "distance": distances[index] if index < len(distances) else None,
+        }
+        for index, chunk_id in enumerate(identifiers)
+    ]
+
+
+def _format_collection_records(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Convert a Chroma collection read into chunk records for lexical search."""
+    identifiers = result.get("ids") or []
+    documents = result.get("documents") or []
+    metadatas = result.get("metadatas") or []
+    return [
+        {
+            "chunk_id": str(chunk_id),
+            "text": str(documents[index]) if index < len(documents) else "",
+            "metadata": dict(metadatas[index] or {}) if index < len(metadatas) else {},
         }
         for index, chunk_id in enumerate(identifiers)
     ]

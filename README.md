@@ -76,6 +76,7 @@ src/core/        Config and logging
 src/document/    Parsing and chunking
 src/retrieval/   Dense, BM25, hybrid, and reranking
 src/generation/  Prompting, LLM wrapper, and RAG pipeline
+src/pipeline/    Offline indexing and online query runtime assembly
 main.py          CLI entry point
 ```
 
@@ -160,7 +161,17 @@ set `reranking.model` to `cross-encoder/ms-marco-MiniLM-L-6-v2`.
 
 ## Run
 
-Answer one question from the local documents:
+Build or refresh the persistent index when source documents, parsing, chunking,
+filtering, or the embedding model changes. This step calls MinerU for PDFs and
+generates document embeddings:
+
+```bash
+.venv/bin/python -m scripts.build_index
+```
+
+Answer one question from the existing index. This loads indexed chunks from
+Chroma, rebuilds the in-memory BM25 index, and does not re-parse or re-embed
+the documents:
 
 ```bash
 .venv/bin/python main.py "What classification accuracy did the ResNet26-V2 model achieve?"
