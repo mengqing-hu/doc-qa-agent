@@ -122,11 +122,12 @@ so expressions such as `x_i` and fractions remain searchable.
 ## Embedding Provider
 
 `embedding.provider` selects between two embedding backends, mirroring the
-`local`/`scadsai` switch used for reranking:
+`local`/`scadsai` switch used for reranking. The current default is the local
+`BAAI/bge-large-en-v1.5` model:
 
-- `scadsai` (default): calls ScaDS.AI's OpenAI-compatible `/embeddings`
-  endpoint (`embedding.base_url`, default `https://llm.scads.ai/v1`) with
-  `embedding.model_name` (default `Qwen/Qwen3-Embedding-4B`) through the same
+- `scadsai`: calls ScaDS.AI's OpenAI-compatible `/embeddings` endpoint
+  (`embedding.base_url`, default `https://llm.scads.ai/v1`) with
+  `embedding.model_name` through the same
   `openai` client used by `LLM`. Vectors are L2-normalized locally after the
   request so distances stay comparable to the local provider's output.
 - `local`: loads a `sentence-transformers` model (`embedding.model_name`,
@@ -136,11 +137,10 @@ Switching `embedding.provider` or `embedding.model_name` changes the vector
 dimension, so it also changes what a Chroma collection can hold. Pick a new
 `vector_store.collection_name` whenever you switch embedding models — reusing
 the old name upserts incompatible-dimension vectors into an existing
-collection and fails. The current default collection is
-`doc_chunks_qwen3_embed`; the earlier `doc_chunks` collection (built with
-`BAAI/bge-large-en-v1.5`) is left untouched on disk, so reverting
-`embedding.provider` to `local` and `vector_store.collection_name` to
-`doc_chunks` restores the previous index without re-embedding.
+collection and fails. The current default collection is `doc_chunks`, which
+contains the `BAAI/bge-large-en-v1.5` vectors used by the current default
+configuration. If you switch to Qwen3 Embedding, use the separate
+`doc_chunks_qwen3_embed` collection.
 
 ## Reranking Provider
 
@@ -386,10 +386,10 @@ about OCT's general defect-detection capability to the study's binary
 classifier) is now correctly refused, likely because the new embedding
 retrieves a different, less misleading candidate set for that query.
 
-Given the clear dense-retrieval gains and the rejection-accuracy improvement
-— at the cost of a small, non-uniform dip in the final reranked Top-5
-metrics that a `hybrid_top_k` re-sweep may recover — Qwen3-Embedding-4B
-(`embedding.provider: scadsai`) is now the default in `config/config.yaml`.
+The current default is the previously evaluated
+`BAAI/bge-large-en-v1.5` + `Qwen3-Reranker-4B` configuration with a 30-chunk
+reranking candidate pool. On the V4 labels, this configuration achieved
+Recall@10 `0.969`, Hit@5/Hit@10 `1.000`, and MRR `0.798`.
 
 ### 2,000 / 200 Chunk Baseline
 
