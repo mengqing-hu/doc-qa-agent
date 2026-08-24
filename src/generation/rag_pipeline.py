@@ -33,20 +33,38 @@ class RAGPipeline:
 
     def answer(self, query: str) -> RAGResponse:
         """Retrieve evidence, generate an answer, and return its source references."""
-        normalized_query = query.strip()
-        if not normalized_query:
-            raise ValueError("query must not be empty")
+        return self.generate(query, self.retrieve(query))
+
+    def retrieve(self, query: str) -> list[dict[str, Any]]:
+        """Retrieve and rerank the final evidence chunks for a query."""
+        normalized_query = _normalized_query(query)
 
         hybrid_results = self.hybrid_retriever.search(normalized_query)
-        reranked_results = self.reranker.rerank(normalized_query, hybrid_results)
-        prompt = self.prompt_builder.build(normalized_query, reranked_results)
+        return self.reranker.rerank(normalized_query, hybrid_results)
+
+    def generate(
+        self,
+        query: str,
+        evidence_chunks: list[dict[str, Any]],
+    ) -> RAGResponse:
+        """Generate a grounded answer from already retrieved evidence chunks."""
+        normalized_query = _normalized_query(query)
+        prompt = self.prompt_builder.build(normalized_query, evidence_chunks)
         answer = self.llm.generate(prompt)
-        sources = tuple(_source_reference(chunk) for chunk in reranked_results)
+        sources = tuple(_source_reference(chunk) for chunk in evidence_chunks)
         logger.info(
             "Answered question with %d retrieved source(s)",
             len(sources),
         )
         return RAGResponse(answer=answer, sources=sources)
+
+
+def _normalized_query(query: str) -> str:
+    """Validate and normalize a query shared by retrieval and generation."""
+    normalized_query = query.strip()
+    if not normalized_query:
+        raise ValueError("query must not be empty")
+    return normalized_query
 
 
 def _source_reference(chunk: dict[str, Any]) -> SourceReference:
