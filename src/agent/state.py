@@ -48,4 +48,9 @@ class AgentState(TypedDict):
     relevance_decisions: NotRequired[list[dict[str, str]]]
     relevance_status: NotRequired[Literal["relevant", "none"]]
     relevance_reason: NotRequired[str]
+    support_status: NotRequired[
+        Literal["pending", "supported", "partially_supported", "unsupported"]
+    ]
+    support_claims: NotRequired[list[dict[str, Any]]]
+    support_reason: NotRequired[str]
     response: NotRequired[ResponseState]

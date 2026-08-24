@@ -52,6 +52,9 @@ class ContextManager:
             "relevance_decisions": [],
             "relevance_status": "none",
             "relevance_reason": "Relevance grading has not run for this turn.",
+            "support_status": "pending",
+            "support_claims": [],
+            "support_reason": "Support verification has not run for this turn.",
         }
 
     def persist_response(self, state: AgentState) -> dict[str, list[ConversationMessage]]:

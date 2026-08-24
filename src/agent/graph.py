@@ -13,6 +13,7 @@ from src.agent.relevance import LLMRelevanceGrader
 from src.agent.rewrite import LLMQueryRewriter
 from src.agent.routes import LLMRetrievalGate, RetrievalAction
 from src.agent.state import AgentState, ConversationMessage, ResponseState
+from src.agent.support import LLMSupportVerifier
 from src.generation.rag_pipeline import RAGPipeline
 from src.generation.response import RAGResponse, SourceReference
 
@@ -24,9 +25,10 @@ def build_agent_graph(
     context_manager: ContextManager,
     query_rewriter: LLMQueryRewriter,
     relevance_grader: LLMRelevanceGrader,
+    support_verifier: LLMSupportVerifier,
     checkpointer: BaseCheckpointSaver | None = None,
 ) -> Any:
-    """Compile the Self-RAG retrieval-gate and relevance workflow."""
+    """Compile the Self-RAG retrieval, relevance, and support workflow."""
     builder = StateGraph(AgentState)
     builder.add_node("retrieval_gate", _retrieval_gate_node(retrieval_gate))
     builder.add_node("context_manager", _context_manager_node(context_manager))
@@ -34,6 +36,7 @@ def build_agent_graph(
     builder.add_node("retrieve", _retrieve_node(pipeline))
     builder.add_node("grade_relevance", _grade_relevance_node(relevance_grader))
     builder.add_node("generate", _generate_node(pipeline))
+    builder.add_node("verify_support", _verify_support_node(support_verifier))
     builder.add_node("abstain", _abstain_node)
     builder.add_node("persist_turn", _persist_turn_node(context_manager))
     builder.add_edge(START, "context_manager")
@@ -56,7 +59,15 @@ def build_agent_graph(
             "abstain": "abstain",
         },
     )
-    builder.add_edge("generate", "persist_turn")
+    builder.add_edge("generate", "verify_support")
+    builder.add_conditional_edges(
+        "verify_support",
+        _select_support_action,
+        {
+            "persist": "persist_turn",
+            "abstain": "abstain",
+        },
+    )
     builder.add_edge("abstain", "persist_turn")
     builder.add_edge("persist_turn", END)
     return builder.compile(checkpointer=checkpointer)
@@ -196,6 +207,44 @@ def _select_relevance_action(state: AgentState) -> str:
     raise RuntimeError("Relevance grader did not return a supported status")
 
 
+def _verify_support_node(support_verifier: LLMSupportVerifier):
+    """Create the node that verifies generated claims against relevant chunks."""
+    def run_verify_support(state: AgentState) -> dict[str, Any]:
+        response = state.get("response")
+        if not isinstance(response, Mapping) or not isinstance(response.get("answer"), str):
+            raise RuntimeError("Support verification requires a generated answer")
+        decision = support_verifier.verify(
+            state["rewritten_query"],
+            response["answer"],
+            state.get("relevant_chunks", []),
+        )
+        return {
+            "support_status": decision.status,
+            "support_claims": [
+                {
+                    "claim": claim.claim,
+                    "support": claim.support,
+                    "chunk_ids": list(claim.chunk_ids),
+                    "reason": claim.reason,
+                }
+                for claim in decision.claims
+            ],
+            "support_reason": decision.reason,
+        }
+
+    return run_verify_support
+
+
+def _select_support_action(state: AgentState) -> str:
+    """Persist only answers whose material claims are fully supported."""
+    support_status = state.get("support_status")
+    if support_status == "supported":
+        return "persist"
+    if support_status in {"partially_supported", "unsupported"}:
+        return "abstain"
+    raise RuntimeError("Support verifier did not return a supported status")
+
+
 def _persist_turn_node(context_manager: ContextManager):
     """Create the node that persists the final user and assistant messages."""
     def run_persist_turn(state: AgentState) -> dict[str, Any]:
@@ -205,8 +254,10 @@ def _persist_turn_node(context_manager: ContextManager):
 
 
 def _abstain_node(state: AgentState) -> dict[str, ResponseState]:
-    """Return a clear response when retrieval or relevance grading abstains."""
-    if state.get("retrieval_action") == "retrieve":
+    """Return a clear response when a reflection rejects the current answer."""
+    if state.get("support_status") in {"partially_supported", "unsupported"}:
+        answer = "The generated answer could not be fully supported by the retrieved documents."
+    elif state.get("retrieval_action") == "retrieve":
         answer = "The retrieved documents do not contain a passage relevant to this question."
     else:
         answer = "I can only answer questions about the indexed documents."
