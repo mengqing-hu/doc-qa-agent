@@ -55,6 +55,9 @@ class ContextManager:
             "support_status": "pending",
             "support_claims": [],
             "support_reason": "Support verification has not run for this turn.",
+            "utility_status": "pending",
+            "utility_missing_requirements": [],
+            "utility_reason": "Utility verification has not run for this turn.",
         }
 
     def persist_response(self, state: AgentState) -> dict[str, list[ConversationMessage]]:
