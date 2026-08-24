@@ -47,6 +47,11 @@ class ContextManager:
             ),
             "retrieved_chunks": [],
             "retrieval_attempts": 0,
+            "relevant_chunks": [],
+            "relevant_chunk_ids": [],
+            "relevance_decisions": [],
+            "relevance_status": "none",
+            "relevance_reason": "Relevance grading has not run for this turn.",
         }
 
     def persist_response(self, state: AgentState) -> dict[str, list[ConversationMessage]]:

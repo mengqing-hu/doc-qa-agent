@@ -9,6 +9,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from src.agent.context import ContextManager
+from src.agent.relevance import LLMRelevanceGrader
 from src.agent.rewrite import LLMQueryRewriter
 from src.agent.routes import LLMRetrievalGate, RetrievalAction
 from src.agent.state import AgentState, ConversationMessage, ResponseState
@@ -22,14 +23,16 @@ def build_agent_graph(
     retrieval_gate: LLMRetrievalGate,
     context_manager: ContextManager,
     query_rewriter: LLMQueryRewriter,
+    relevance_grader: LLMRelevanceGrader,
     checkpointer: BaseCheckpointSaver | None = None,
 ) -> Any:
-    """Compile the Self-RAG retrieval-gate workflow."""
+    """Compile the Self-RAG retrieval-gate and relevance workflow."""
     builder = StateGraph(AgentState)
     builder.add_node("retrieval_gate", _retrieval_gate_node(retrieval_gate))
     builder.add_node("context_manager", _context_manager_node(context_manager))
     builder.add_node("query_rewriter", _query_rewriter_node(query_rewriter))
     builder.add_node("retrieve", _retrieve_node(pipeline))
+    builder.add_node("grade_relevance", _grade_relevance_node(relevance_grader))
     builder.add_node("generate", _generate_node(pipeline))
     builder.add_node("abstain", _abstain_node)
     builder.add_node("persist_turn", _persist_turn_node(context_manager))
@@ -44,7 +47,15 @@ def build_agent_graph(
         },
     )
     builder.add_edge("query_rewriter", "retrieve")
-    builder.add_edge("retrieve", "generate")
+    builder.add_edge("retrieve", "grade_relevance")
+    builder.add_conditional_edges(
+        "grade_relevance",
+        _select_relevance_action,
+        {
+            "generate": "generate",
+            "abstain": "abstain",
+        },
+    )
     builder.add_edge("generate", "persist_turn")
     builder.add_edge("abstain", "persist_turn")
     builder.add_edge("persist_turn", END)
@@ -146,6 +157,45 @@ def _retrieve_node(pipeline: RAGPipeline):
     return run_retrieve
 
 
+def _grade_relevance_node(relevance_grader: LLMRelevanceGrader):
+    """Create the node that filters retrieved passages using the Rel reflection."""
+    def run_grade_relevance(state: AgentState) -> dict[str, Any]:
+        retrieved_chunks = state.get("retrieved_chunks", [])
+        decision = relevance_grader.grade(state["rewritten_query"], retrieved_chunks)
+        relevant_chunk_ids = set(decision.relevant_chunk_ids)
+        relevance_decisions = [
+            {
+                "chunk_id": passage.chunk_id,
+                "relevance": passage.relevance,
+                "reason": passage.reason,
+            }
+            for passage in decision.passages
+        ]
+        return {
+            "relevant_chunks": [
+                chunk
+                for chunk in retrieved_chunks
+                if str(chunk.get("chunk_id")) in relevant_chunk_ids
+            ],
+            "relevant_chunk_ids": list(decision.relevant_chunk_ids),
+            "relevance_decisions": relevance_decisions,
+            "relevance_status": decision.status,
+            "relevance_reason": decision.reason,
+        }
+
+    return run_grade_relevance
+
+
+def _select_relevance_action(state: AgentState) -> str:
+    """Select generation only when at least one passage is relevant."""
+    relevance_status = state.get("relevance_status")
+    if relevance_status == "relevant":
+        return "generate"
+    if relevance_status == "none":
+        return "abstain"
+    raise RuntimeError("Relevance grader did not return a supported status")
+
+
 def _persist_turn_node(context_manager: ContextManager):
     """Create the node that persists the final user and assistant messages."""
     def run_persist_turn(state: AgentState) -> dict[str, Any]:
@@ -155,24 +205,27 @@ def _persist_turn_node(context_manager: ContextManager):
 
 
 def _abstain_node(state: AgentState) -> dict[str, ResponseState]:
-    """Return a clear response when retrieval is not appropriate."""
-    del state
+    """Return a clear response when retrieval or relevance grading abstains."""
+    if state.get("retrieval_action") == "retrieve":
+        answer = "The retrieved documents do not contain a passage relevant to this question."
+    else:
+        answer = "I can only answer questions about the indexed documents."
     return {
         "response": {
-            "answer": "I can only answer questions about the indexed documents.",
+            "answer": answer,
             "sources": [],
         }
     }
 
 
 def _generate_node(pipeline: RAGPipeline):
-    """Create the node that generates an answer from retrieved chunks."""
+    """Create the node that generates an answer from relevant chunks only."""
     def run_generate(state: AgentState) -> dict[str, ResponseState]:
         return {
             "response": _response_to_state(
                 pipeline.generate(
                     state["rewritten_query"],
-                    state.get("retrieved_chunks", []),
+                    state.get("relevant_chunks", []),
                 )
             )
         }
