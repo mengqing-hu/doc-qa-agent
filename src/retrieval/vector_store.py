@@ -69,6 +69,14 @@ class VectorStore:
             self.collection.name,
         )
 
+    def replace_chunks(self, chunks: list[dict[str, Any]]) -> None:
+        """Replace all records in this collection with the supplied chunks."""
+        collection_name = self.collection.name
+        self.client.delete_collection(collection_name)
+        self.collection = self.client.get_or_create_collection(collection_name)
+        logger.info("Cleared collection %s before rebuilding", collection_name)
+        self.add_chunks(chunks)
+
     def search(
         self,
         query: str,

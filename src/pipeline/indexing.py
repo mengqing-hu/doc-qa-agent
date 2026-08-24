@@ -14,10 +14,10 @@ from src.retrieval.vector_store import VectorStore
 
 
 def build_document_index(config: Config) -> int:
-    """Parse configured documents and upsert their chunks into Chroma."""
+    """Parse configured documents and replace their Chroma collection."""
     _, chunks = prepare_chunks(parse_configured_documents(config), config)
     vector_store = VectorStore(config, embedder=Embedder(config))
-    vector_store.add_chunks(chunks)
+    vector_store.replace_chunks(chunks)
     return len(chunks)
 
 
