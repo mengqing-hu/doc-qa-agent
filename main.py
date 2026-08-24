@@ -6,7 +6,13 @@ import argparse
 
 from langgraph.checkpoint.memory import InMemorySaver
 
-from src.agent.graph import build_single_hop_rag_graph, invoke_single_hop_rag
+from src.agent.context import ContextManager
+from src.agent.graph import build_agent_graph, invoke_agent_graph
+from src.agent.relevance import LLMRelevanceGrader
+from src.agent.rewrite import LLMQueryRewriter
+from src.agent.routes import LLMRetrievalGate
+from src.agent.support import LLMSupportVerifier
+from src.agent.utility import LLMUtilityVerifier
 from src.core.config import Config
 from src.core.logger import setup_logging
 from src.pipeline.query_runtime import build_query_pipeline
@@ -17,11 +23,18 @@ def main() -> None:
     arguments = _parse_arguments()
     config = Config()
     setup_logging(config)
-    graph = build_single_hop_rag_graph(
-        build_query_pipeline(config),
+    pipeline = build_query_pipeline(config)
+    graph = build_agent_graph(
+        pipeline,
+        retrieval_gate=LLMRetrievalGate(pipeline.llm),
+        context_manager=ContextManager(config),
+        query_rewriter=LLMQueryRewriter(pipeline.llm),
+        relevance_grader=LLMRelevanceGrader(pipeline.llm),
+        support_verifier=LLMSupportVerifier(pipeline.llm),
+        utility_verifier=LLMUtilityVerifier(pipeline.llm),
         checkpointer=InMemorySaver(),
     )
-    response = invoke_single_hop_rag(
+    response = invoke_agent_graph(
         graph,
         arguments.question,
         thread_id=arguments.thread_id,

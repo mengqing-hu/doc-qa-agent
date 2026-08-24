@@ -13,14 +13,31 @@ from src.generation.llm import LLM
 
 ClaimSupport = Literal["supported", "unsupported"]
 SupportStatus = Literal["supported", "partially_supported", "unsupported"]
+DEFAULT_SUPPORT_MAX_TOKENS = 1024
 CODE_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
+THINK_BLOCK_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 SUPPORT_VERIFIER_PROMPT = """You are the support verifier for a document question-answering system.
 
 Evaluate every material factual claim in the answer against the supplied
 relevant passages. Use only those passages as evidence; do not use general
 knowledge. A claim is supported only when the passages entail it. Mark a claim
-unsupported when it is absent, contradicted, or more specific than the
-passages. Do not judge writing quality or whether the answer is useful.
+unsupported when it is absent, more specific than the passages, or presents
+one value as definitive despite conflicting evidence. If passages disagree,
+an answer that explicitly attributes each value to its source and reports the
+discrepancy is supported; do not mark an attributed value unsupported merely
+because another passage contains a different value. Do not judge writing
+quality or whether the answer is useful. Treat a name variant (for example,
+a model, method, or dataset name with an added qualifier such as a depth,
+version, or size suffix) as referring to the same entity only when the
+supplied passages establish that relationship — for example, one passage
+describes the base architecture and another passage names the specific
+configured variant. Keep a parameter value and its stated rationale as
+separate claims so that an explicitly stated rationale can be supported
+even when the entity name appears only in a neighboring passage.
+
+Entity-resolution context below is conversation context, not document
+evidence. Use it only to resolve a model alias or omitted reference; use the
+relevant passages for all factual support decisions.
 
 Return only a JSON object with this exact schema:
 {{
@@ -36,6 +53,11 @@ Return only a JSON object with this exact schema:
   "reason": "A concise explanation of the overall support decision."
 }}
 
+Keep claims and reasons concise. Do not repeat the passages or the full answer.
+The status must match the claim labels: use "supported" when every claim is
+supported, "unsupported" when none is supported, and "partially_supported"
+only when both labels are present.
+
 Question:
 {question}
 
@@ -44,6 +66,49 @@ Generated answer:
 
 Relevant passages:
 {chunks}
+
+Entity-resolution context:
+{conversation_context}
+"""
+SUPPORT_TRIM_PROMPT = """You are editing a document question-answering system's draft answer.
+
+Some claims in the draft answer below were not supported by the retrieved
+passages and must be removed. Rewrite the answer using only the supported
+facts listed below. Do not add new facts, do not hedge about what was
+removed, and do not mention the verification process. Keep the answer
+concise and directly address the question using only the supported facts.
+
+Question:
+{question}
+
+Draft answer:
+{answer}
+
+Supported facts:
+{supported_facts}
+
+Return only the rewritten answer text, with no preamble or JSON wrapper.
+"""
+SUPPORT_JSON_REPAIR_PROMPT = """Convert the following support-verifier response into a valid JSON object.
+
+Return only compact JSON using exactly this schema:
+{{
+  "status": "supported | partially_supported | unsupported",
+  "claims": [
+    {{
+      "claim": "One material factual claim.",
+      "support": "supported | unsupported",
+      "chunk_ids": ["chunk_id"],
+      "reason": "A concise reason."
+    }}
+  ],
+  "reason": "A concise overall reason."
+}}
+
+Do not add commentary. Preserve only claims and chunk IDs present in the response.
+
+Response to repair:
+{response}
 """
 
 
@@ -69,15 +134,19 @@ class SupportDecision:
 class LLMSupportVerifier:
     """Verify generated claims against the relevant retrieved passages."""
 
-    def __init__(self, llm: LLM) -> None:
+    def __init__(self, llm: LLM, *, max_tokens: int = DEFAULT_SUPPORT_MAX_TOKENS) -> None:
         """Store the configured LLM used to verify generated claims."""
         self.llm = llm
+        if max_tokens <= 0:
+            raise ValueError("support max_tokens must be greater than zero")
+        self.max_tokens = max_tokens
 
     def verify(
         self,
         question: str,
         answer: str,
         chunks: Sequence[Mapping[str, Any]],
+        conversation_context: Sequence[Mapping[str, Any]] = (),
     ) -> SupportDecision:
         """Return a validated support decision for a generated answer."""
         normalized_question = question.strip()
@@ -104,14 +173,69 @@ class LLMSupportVerifier:
             question=json.dumps(normalized_question, ensure_ascii=False),
             answer=json.dumps(normalized_answer, ensure_ascii=False),
             chunks=json.dumps(chunk_payload, ensure_ascii=False),
+            conversation_context=json.dumps(
+                list(conversation_context), ensure_ascii=False
+            ),
         )
         available_chunk_ids = {
             item["chunk_id"] for item in chunk_payload if item["chunk_id"]
         }
-        return _parse_support_decision(
-            self.llm.generate(prompt),
-            available_chunk_ids=available_chunk_ids,
+        raw_response = self._generate(prompt)
+        try:
+            return _parse_support_decision(
+                raw_response,
+                available_chunk_ids=available_chunk_ids,
+            )
+        except RuntimeError as error:
+            if str(error) != "Support verifier did not return valid JSON":
+                raise
+            repaired_response = self._generate(
+                SUPPORT_JSON_REPAIR_PROMPT.format(response=raw_response)
+            )
+            return _parse_support_decision(
+                repaired_response,
+                available_chunk_ids=available_chunk_ids,
+            )
+
+    def trim_to_supported_claims(
+        self,
+        question: str,
+        answer: str,
+        claims: Sequence[Mapping[str, Any]],
+    ) -> str:
+        """Rewrite an answer to include only claims marked as supported."""
+        normalized_question = question.strip()
+        normalized_answer = answer.strip()
+        if not normalized_question:
+            raise ValueError("question must not be empty")
+        if not normalized_answer:
+            raise ValueError("answer must not be empty")
+        supported_facts = [
+            str(claim.get("claim", ""))
+            for claim in claims
+            if claim.get("support") == "supported"
+        ]
+        if not supported_facts:
+            raise ValueError("claims must include at least one supported claim")
+
+        prompt = SUPPORT_TRIM_PROMPT.format(
+            question=json.dumps(normalized_question, ensure_ascii=False),
+            answer=json.dumps(normalized_answer, ensure_ascii=False),
+            supported_facts=json.dumps(supported_facts, ensure_ascii=False),
         )
+        trimmed = self._generate(prompt).strip()
+        if not trimmed:
+            raise RuntimeError("Support verifier returned an empty trimmed answer")
+        return trimmed
+
+    def _generate(self, prompt: str) -> str:
+        """Generate verifier output with compatibility for simple test doubles."""
+        try:
+            return self.llm.generate(prompt, max_tokens=self.max_tokens)
+        except TypeError as error:
+            if "max_tokens" not in str(error):
+                raise
+            return self.llm.generate(prompt)
 
 
 def _parse_support_decision(
@@ -120,7 +244,7 @@ def _parse_support_decision(
     available_chunk_ids: set[str],
 ) -> SupportDecision:
     """Validate the JSON-only response returned by the support verifier."""
-    response_text = response.strip()
+    response_text = _extract_json_text(response)
     code_fence_match = CODE_FENCE_PATTERN.fullmatch(response_text)
     if code_fence_match:
         response_text = code_fence_match.group(1).strip()
@@ -175,19 +299,33 @@ def _parse_support_decision(
         )
 
     supported_count = sum(claim.support == "supported" for claim in claims)
-    if raw_status == "supported" and supported_count != len(claims):
-        raise RuntimeError("Supported status requires every claim to be supported")
-    if raw_status == "unsupported" and supported_count != 0:
-        raise RuntimeError("Unsupported status cannot contain supported claims")
-    if raw_status == "partially_supported" and not (
-        0 < supported_count < len(claims)
-    ):
-        raise RuntimeError(
-            "Partially supported status requires both supported and unsupported claims"
-        )
+    if supported_count == 0:
+        normalized_status: SupportStatus = "unsupported"
+    elif supported_count == len(claims):
+        normalized_status = "supported"
+    else:
+        normalized_status = "partially_supported"
 
     return SupportDecision(
-        status=raw_status,
+        status=normalized_status,
         claims=tuple(claims),
         reason=reason.strip(),
     )
+
+
+def _extract_json_text(response: str) -> str:
+    """Extract a likely JSON object from common LLM wrapper text."""
+    response_text = response.strip()
+    response_text = THINK_BLOCK_PATTERN.sub("", response_text).strip()
+    code_fence_match = CODE_FENCE_PATTERN.fullmatch(response_text)
+    if code_fence_match:
+        return code_fence_match.group(1).strip()
+
+    try:
+        json.loads(response_text)
+    except json.JSONDecodeError:
+        start = response_text.find("{")
+        end = response_text.rfind("}")
+        if start >= 0 and end > start:
+            return response_text[start : end + 1].strip()
+    return response_text

@@ -19,6 +19,9 @@ from src.generation.rag_pipeline import RAGPipeline
 from src.generation.response import RAGResponse, SourceReference
 
 
+MAX_RETRIEVAL_ATTEMPTS = 2
+
+
 def build_agent_graph(
     pipeline: RAGPipeline,
     *,
@@ -39,6 +42,7 @@ def build_agent_graph(
     builder.add_node("grade_relevance", _grade_relevance_node(relevance_grader))
     builder.add_node("generate", _generate_node(pipeline))
     builder.add_node("verify_support", _verify_support_node(support_verifier))
+    builder.add_node("trim_answer", _trim_answer_node(support_verifier))
     builder.add_node("verify_utility", _verify_utility_node(utility_verifier))
     builder.add_node("abstain", _abstain_node)
     builder.add_node("persist_turn", _persist_turn_node(context_manager))
@@ -68,9 +72,12 @@ def build_agent_graph(
         _select_support_action,
         {
             "verify": "verify_utility",
+            "trim": "trim_answer",
+            "retry": "query_rewriter",
             "abstain": "abstain",
         },
     )
+    builder.add_edge("trim_answer", "verify_utility")
     builder.add_conditional_edges(
         "verify_utility",
         _select_utility_action,
@@ -154,9 +161,15 @@ def _context_manager_node(context_manager: ContextManager):
 def _query_rewriter_node(query_rewriter: LLMQueryRewriter):
     """Create the node that resolves references in document retrieval queries."""
     def run_query_rewriter(state: AgentState) -> dict[str, str | bool]:
+        retry_feedback = (
+            state.get("support_reason")
+            if state.get("support_status") in {"unsupported", "partially_supported"}
+            else None
+        )
         decision = query_rewriter.rewrite(
             state["original_query"],
             state.get("conversation_context", []),
+            retry_feedback=retry_feedback,
         )
         return {
             "rewritten_query": decision.rewritten_query,
@@ -228,6 +241,7 @@ def _verify_support_node(support_verifier: LLMSupportVerifier):
             state["rewritten_query"],
             response["answer"],
             state.get("relevant_chunks", []),
+            state.get("conversation_context", []),
         )
         return {
             "support_status": decision.status,
@@ -247,13 +261,48 @@ def _verify_support_node(support_verifier: LLMSupportVerifier):
 
 
 def _select_support_action(state: AgentState) -> str:
-    """Verify utility only after all material claims are supported."""
+    """Route based on the support reflection: verify, retry, trim, or abstain."""
     support_status = state.get("support_status")
     if support_status == "supported":
         return "verify"
     if support_status in {"partially_supported", "unsupported"}:
+        if int(state.get("retrieval_attempts", 0)) < MAX_RETRIEVAL_ATTEMPTS:
+            return "retry"
+        if support_status == "partially_supported":
+            return "trim"
         return "abstain"
     raise RuntimeError("Support verifier did not return a supported status")
+
+
+def _trim_answer_node(support_verifier: LLMSupportVerifier):
+    """Create the node that rewrites a partially supported answer."""
+    def run_trim_answer(state: AgentState) -> dict[str, ResponseState]:
+        response = state.get("response")
+        if not isinstance(response, Mapping) or not isinstance(response.get("answer"), str):
+            raise RuntimeError("Trimming requires a generated answer")
+        trimmed_answer = support_verifier.trim_to_supported_claims(
+            state["original_query"],
+            response["answer"],
+            state.get("support_claims", []),
+        )
+        supported_chunk_ids = {
+            chunk_id
+            for claim in state.get("support_claims", [])
+            if claim.get("support") == "supported"
+            for chunk_id in claim.get("chunk_ids", [])
+        }
+        return {
+            "response": {
+                "answer": trimmed_answer,
+                "sources": [
+                    source
+                    for source in response.get("sources", [])
+                    if source.get("chunk_id") in supported_chunk_ids
+                ],
+            }
+        }
+
+    return run_trim_answer
 
 
 def _verify_utility_node(utility_verifier: LLMUtilityVerifier):

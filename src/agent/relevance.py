@@ -15,11 +15,21 @@ RelevanceLabel = Literal["relevant", "irrelevant"]
 CODE_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 RELEVANCE_GRADER_PROMPT = """You are the passage relevance grader for a document question-answering system.
 
-For every retrieved passage, decide whether it contains information that is
-directly useful for answering the question. Mark a passage irrelevant when it
-only shares superficial vocabulary or discusses a different entity, task, or
-experiment. Do not judge whether the passages are sufficient for a complete
-answer; only judge passage-level relevance.
+For every retrieved passage, decide whether it contains information that can
+materially contribute to answering the question. Relevance is broader than an
+exact answer or keyword match: include useful context, definitions, motivation,
+methods, experiments, results, limitations, and conclusions when they are
+related to the question. For broad requests such as "what is this document
+about", "summarize", or "give an overview", keep complementary passages that
+describe the document's topic, objectives, approach, and main findings. Prefer
+retaining several related passages over selecting only the single best match.
+Mark a passage irrelevant only when it has no meaningful contribution or
+discusses a different entity, task, or experiment. For a narrowly scoped
+question, require evidence or an interpretation that directly helps answer
+that question; do not retain a glossary, generic background, or future-work
+passage merely because it shares the same domain vocabulary. Do not judge
+whether the passages are sufficient for a complete answer; only judge
+passage-level relevance.
 
 Return only a JSON object with this exact schema:
 {{

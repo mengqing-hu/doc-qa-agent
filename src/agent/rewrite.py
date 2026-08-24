@@ -17,7 +17,7 @@ QUERY_REWRITE_PROMPT = """Rewrite the current user request into a standalone que
 Use the conversation history only to resolve references, omitted entities, or context.
 Do not answer the question. Do not add facts that are absent from the user request and history.
 If the request is already standalone, preserve its meaning with minimal changes.
-
+{retry_section}
 Return only a JSON object with this exact schema:
 {{
   "rewritten_query": "A standalone retrieval query.",
@@ -30,6 +30,12 @@ Conversation history:
 
 Current user request:
 {question}
+"""
+RETRY_FEEDBACK_SECTION = """
+A prior retrieval attempt for this request did not return passages that
+supported the generated answer, for this reason: {retry_feedback}
+Produce a different retrieval query that is more likely to reach passages
+covering the missing information. Do not just repeat the previous query.
 """
 
 
@@ -53,12 +59,20 @@ class LLMQueryRewriter:
         self,
         question: str,
         conversation_context: Sequence[ConversationMessage],
+        *,
+        retry_feedback: str | None = None,
     ) -> RewriteDecision:
         """Return a validated standalone retrieval query."""
         normalized_question = question.strip()
         if not normalized_question:
             raise ValueError("question must not be empty")
+        retry_section = ""
+        if retry_feedback is not None and retry_feedback.strip():
+            retry_section = RETRY_FEEDBACK_SECTION.format(
+                retry_feedback=retry_feedback.strip()
+            )
         prompt = QUERY_REWRITE_PROMPT.format(
+            retry_section=retry_section,
             history=json.dumps(list(conversation_context), ensure_ascii=False),
             question=json.dumps(normalized_question, ensure_ascii=False),
         )

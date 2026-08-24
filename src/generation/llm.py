@@ -44,17 +44,20 @@ class LLM:
             base_url=str(self.config.get("llm", "base_url")),
         )
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, *, max_tokens: int | None = None) -> str:
         """Return one non-empty chat completion for a rendered prompt."""
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
+        token_limit = self.max_tokens if max_tokens is None else int(max_tokens)
+        if token_limit <= 0:
+            raise ValueError("max_tokens must be greater than zero")
 
         try:
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=self.temperature,
-                max_tokens=self.max_tokens,
+                max_tokens=token_limit,
             )
         except OpenAIError as error:
             logger.exception("LLM request failed for model %s", self.model)

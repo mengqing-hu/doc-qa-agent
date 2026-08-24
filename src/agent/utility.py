@@ -18,7 +18,10 @@ UTILITY_VERIFIER_PROMPT = """You are the utility verifier for a document questio
 Evaluate whether the supported answer directly and completely addresses the
 user's request. Check every explicit part of the question, preserve important
 qualifications, and avoid treating unrelated detail as an answer. Do not add
-facts and do not reject an answer merely because it is concise. The claims have
+facts and do not reject an answer merely because it is concise. For comparison
+questions, accept a clear side-by-side list or table when each value is tied to
+the requested entity and the relationship is stated or directly apparent from
+the values; do not require the word "compared" to appear. The claims have
 already passed document support verification.
 
 Return only a JSON object with this exact schema:
