@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import Any, Literal
 from src.generation.llm import LLM
 
 
+logger = logging.getLogger(__name__)
 ClaimSupport = Literal["supported", "unsupported"]
 SupportStatus = Literal["supported", "partially_supported", "unsupported"]
 DEFAULT_SUPPORT_MAX_TOKENS = 1024
@@ -186,16 +188,30 @@ class LLMSupportVerifier:
                 raw_response,
                 available_chunk_ids=available_chunk_ids,
             )
-        except RuntimeError as error:
-            if str(error) != "Support verifier did not return valid JSON":
-                raise
+        except RuntimeError as first_error:
             repaired_response = self._generate(
                 SUPPORT_JSON_REPAIR_PROMPT.format(response=raw_response)
             )
-            return _parse_support_decision(
-                repaired_response,
-                available_chunk_ids=available_chunk_ids,
-            )
+            try:
+                return _parse_support_decision(
+                    repaired_response,
+                    available_chunk_ids=available_chunk_ids,
+                )
+            except RuntimeError as second_error:
+                logger.warning(
+                    "Support verifier response was invalid after a repair attempt "
+                    "(first error: %s; second error: %s); falling back to unsupported.",
+                    first_error,
+                    second_error,
+                )
+                return SupportDecision(
+                    status="unsupported",
+                    claims=(),
+                    reason=(
+                        "Support verifier could not produce a valid decision after "
+                        f"a repair attempt: {second_error}"
+                    ),
+                )
 
     def trim_to_supported_claims(
         self,

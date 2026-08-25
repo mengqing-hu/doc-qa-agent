@@ -82,11 +82,13 @@ main.py          CLI entry point
 
 ## Setup
 
-Create a virtual environment and install the runtime dependencies:
+Create a virtual environment and install the runtime dependencies from the
+pinned `requirements.txt` (includes the `langgraph`/`streamlit` stack used by
+the agent and chat UI):
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install python-docx langchain-text-splitters sentence-transformers chromadb rank_bm25 openai python-dotenv pyyaml
+.venv/bin/pip install -r requirements.txt
 ```
 
 Create a `.env` file with at least:
@@ -174,7 +176,15 @@ Chroma, rebuilds the in-memory BM25 index, and does not re-parse or re-embed
 the documents:
 
 ```bash
-.venv/bin/python main.py "What classification accuracy did the ResNet26-V2 model achieve?"
+.venv/bin/python main.py "Your question here"
+```
+
+Launch the Streamlit chat UI for the stateful multi-turn agent (query
+rewriting, retrieval gating, and relevance/support/utility verification, with
+conversation history persisted to `data/checkpoints.sqlite`):
+
+```bash
+.venv/bin/streamlit run app.py
 ```
 
 Annotate evaluation queries:
@@ -253,6 +263,25 @@ This command writes the following files to `evaluation/results/v4/`:
 - `v2_hybrid_rerank.json`
 - `unanswerable_rejection.json`
 - `comparison.json`
+
+Run the stateful multi-turn conversation evaluation (query rewriting, retrieval
+gating, relevance/support/utility verification, and abstention, scored against
+labeled trajectories):
+
+```bash
+.venv/bin/python -m evaluation.evaluate_conversations \
+  --experiment-name baseline-context-rewrite \
+  --workers 4
+```
+
+This reads `evaluation/conversations/development/v1/trajectories.json` by
+default and writes the scored result to
+`evaluation/results/conversations/development/v1/<experiment-name>.json`.
+Each trajectory runs on its own isolated LangGraph thread; `--workers` sets how
+many trajectories execute concurrently (turns within one trajectory always run
+in order). Use `--validate-only` to check trajectory labels and indexed chunk
+IDs without calling the graph, and `--limit N` to run only the first `N`
+trajectories.
 
 Run RAGAS evaluation for the same answerable queries:
 
@@ -488,6 +517,80 @@ rejection accuracy:
 | Rejection accuracy | 0.800 |
 | Refused queries | 4 / 5 |
 | Evaluation failures | 0 |
+
+### Multi-Turn Conversation Evaluation Baseline
+
+Results are stored in
+`evaluation/results/conversations/development/v1/baseline-context-rewrite-v1.json`,
+using the labeled trajectories in
+`evaluation/conversations/development/v1/trajectories.json`. Unlike the
+single-shot retrieval evaluations above, this scores the full stateful agent
+graph — context-aware query rewriting, retrieval gating, relevance/support/
+utility verification, and grounded abstention — across 21 multi-turn
+conversations (63 turns total), run with `--workers 4`:
+
+| Metric | Value |
+|---|---:|
+| Retrieval action accuracy | 0.984 |
+| Relevance status accuracy | 1.000 |
+| Required query term pass rate | 0.733 |
+| Forbidden query term pass rate | 0.913 |
+| Answerable evidence hit rate | 0.638 |
+| Answerable relevance hit rate | 0.897 |
+| Answerable support rate | 0.776 |
+| Answerable utility rate | 0.690 |
+| Grounded abstention accuracy | 0.800 |
+| Trajectory success rate | 0.048 |
+| Mean latency | 53.9 s/turn |
+| Failed turns (evaluator errors) | 0 / 63 |
+
+Query rewriting and evidence retrieval are the current weak points: required
+query terms are missing from the rewritten query in about a quarter of turns,
+and about a third of answerable turns fail to retrieve their labeled evidence
+chunk. `trajectory_success_rate` requires every automated check to pass on
+every turn of a trajectory, so it compounds the rates above into a strict
+aggregate (currently about 1 of 21 trajectories passes end-to-end) — read it
+as a strict summary signal, not the primary metric to optimize directly.
+
+LLM responses are not fully deterministic, so re-running the same command can
+shift these rates by a few percentage points between runs. Treat this
+snapshot as the baseline for comparing future query-rewrite, retrieval, and
+verifier changes against, not as an exact fixed target. Reproduce with:
+
+```bash
+.venv/bin/python -m evaluation.evaluate_conversations \
+  --experiment-name baseline-context-rewrite-v1 \
+  --workers 4
+```
+
+### Self-RAG Limitations
+
+The agent graph implements a Self-RAG-style loop (retrieval gate → query
+rewrite → retrieve → grade relevance → generate → verify support → verify
+utility), which trades latency and complexity for answer reliability. The
+baseline above surfaces the concrete costs:
+
+- **Latency scales with the number of reflection steps.** Each turn makes up
+  to 6-7 sequential LLM calls, averaging 53.9 s/turn.
+- **Errors compound across the chain instead of being corrected.** Every step
+  is an independent LLM judgment ANDed together, so a single wrong call fails
+  the whole turn; `trajectory_success_rate` (0.048) shows how a chain of
+  individually decent per-check rates (0.7-1.0) compounds into a low
+  end-to-end rate.
+- **The reflection judgments are themselves unreliable.** The
+  relevant/supported/useful labels are LLM-generated and can be wrong or
+  malformed (the repair-and-fallback logic in `src/agent/support.py` and
+  `src/agent/relevance.py` exists because of this).
+- **It cannot fix upstream retrieval misses.** Self-RAG filters noise out of
+  what was retrieved; it cannot invent evidence that retrieval never found.
+  `answerable_evidence_hit_rate` (0.638) is the current bottleneck and lives
+  upstream of every reflection step.
+- **Multi-turn query rewriting is an added failure surface** not present in
+  single-turn Self-RAG: `required_query_term_pass_rate` (0.733) shows the
+  rewriter regularly drops terms needed for retrieval.
+- **Abstention is not fully reliable**: `grounded_abstention_accuracy` (0.800)
+  means one in five unanswerable questions is still answered or one
+  answerable question is wrongly refused.
 
 ## Notes
 

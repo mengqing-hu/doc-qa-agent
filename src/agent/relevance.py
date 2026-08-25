@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import Any, Literal
 from src.generation.llm import LLM
 
 
+logger = logging.getLogger(__name__)
 RelevanceLabel = Literal["relevant", "irrelevant"]
 CODE_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 RELEVANCE_GRADER_PROMPT = """You are the passage relevance grader for a document question-answering system.
@@ -48,6 +50,26 @@ Question:
 
 Retrieved passages:
 {chunks}
+"""
+RELEVANCE_JSON_REPAIR_PROMPT = """Convert the following relevance-grader response into a valid JSON object.
+
+Return only compact JSON using exactly this schema:
+{{
+  "passages": [
+    {{
+      "chunk_id": "chunk_id",
+      "relevance": "relevant | irrelevant",
+      "reason": "A concise reason."
+    }}
+  ],
+  "reason": "A concise overall reason."
+}}
+
+The response must grade every one of these chunk IDs exactly once: {chunk_ids}.
+Do not add commentary. Preserve only chunk IDs present in that list.
+
+Response to repair:
+{response}
 """
 
 
@@ -115,10 +137,38 @@ class LLMRelevanceGrader:
         available_chunk_ids = {
             item["chunk_id"] for item in chunk_payload if item["chunk_id"]
         }
-        return _parse_relevance_decision(
-            self.llm.generate(prompt),
-            available_chunk_ids=available_chunk_ids,
-        )
+        raw_response = self.llm.generate(prompt)
+        try:
+            return _parse_relevance_decision(
+                raw_response,
+                available_chunk_ids=available_chunk_ids,
+            )
+        except RuntimeError as first_error:
+            repaired_response = self.llm.generate(
+                RELEVANCE_JSON_REPAIR_PROMPT.format(
+                    response=raw_response,
+                    chunk_ids=json.dumps(sorted(available_chunk_ids), ensure_ascii=False),
+                )
+            )
+            try:
+                return _parse_relevance_decision(
+                    repaired_response,
+                    available_chunk_ids=available_chunk_ids,
+                )
+            except RuntimeError as second_error:
+                logger.warning(
+                    "Relevance grader response was invalid after a repair attempt "
+                    "(first error: %s; second error: %s); falling back to no relevant passages.",
+                    first_error,
+                    second_error,
+                )
+                return RelevanceDecision(
+                    passages=(),
+                    reason=(
+                        "Relevance grader could not produce a valid decision after "
+                        f"a repair attempt: {second_error}"
+                    ),
+                )
 
 
 def _parse_relevance_decision(
