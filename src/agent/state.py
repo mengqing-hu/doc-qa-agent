@@ -53,7 +53,4 @@ class AgentState(TypedDict):
     ]
     support_claims: NotRequired[list[dict[str, Any]]]
     support_reason: NotRequired[str]
-    utility_status: NotRequired[Literal["pending", "useful", "not_useful"]]
-    utility_missing_requirements: NotRequired[list[str]]
-    utility_reason: NotRequired[str]
     response: NotRequired[ResponseState]

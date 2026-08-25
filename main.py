@@ -12,7 +12,6 @@ from src.agent.relevance import LLMRelevanceGrader
 from src.agent.rewrite import LLMQueryRewriter
 from src.agent.routes import LLMRetrievalGate
 from src.agent.support import LLMSupportVerifier
-from src.agent.utility import LLMUtilityVerifier
 from src.core.config import Config
 from src.core.logger import setup_logging
 from src.pipeline.query_runtime import build_query_pipeline
@@ -31,7 +30,6 @@ def main() -> None:
         query_rewriter=LLMQueryRewriter(pipeline.llm),
         relevance_grader=LLMRelevanceGrader(pipeline.llm),
         support_verifier=LLMSupportVerifier(pipeline.llm),
-        utility_verifier=LLMUtilityVerifier(pipeline.llm),
         checkpointer=InMemorySaver(),
     )
     response = invoke_agent_graph(

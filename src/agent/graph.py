@@ -14,7 +14,6 @@ from src.agent.rewrite import LLMQueryRewriter
 from src.agent.routes import LLMRetrievalGate, RetrievalAction
 from src.agent.state import AgentState, ConversationMessage, ResponseState
 from src.agent.support import LLMSupportVerifier
-from src.agent.utility import LLMUtilityVerifier
 from src.generation.rag_pipeline import RAGPipeline
 from src.generation.response import RAGResponse, SourceReference
 
@@ -30,7 +29,6 @@ def build_agent_graph(
     query_rewriter: LLMQueryRewriter,
     relevance_grader: LLMRelevanceGrader,
     support_verifier: LLMSupportVerifier,
-    utility_verifier: LLMUtilityVerifier,
     checkpointer: BaseCheckpointSaver | None = None,
 ) -> Any:
     """Compile the complete Self-RAG reflection workflow."""
@@ -43,7 +41,6 @@ def build_agent_graph(
     builder.add_node("generate", _generate_node(pipeline))
     builder.add_node("verify_support", _verify_support_node(support_verifier))
     builder.add_node("trim_answer", _trim_answer_node(support_verifier))
-    builder.add_node("verify_utility", _verify_utility_node(utility_verifier))
     builder.add_node("abstain", _abstain_node)
     builder.add_node("persist_turn", _persist_turn_node(context_manager))
     builder.add_edge(START, "context_manager")
@@ -71,21 +68,13 @@ def build_agent_graph(
         "verify_support",
         _select_support_action,
         {
-            "verify": "verify_utility",
+            "persist": "persist_turn",
             "trim": "trim_answer",
             "retry": "query_rewriter",
             "abstain": "abstain",
         },
     )
-    builder.add_edge("trim_answer", "verify_utility")
-    builder.add_conditional_edges(
-        "verify_utility",
-        _select_utility_action,
-        {
-            "persist": "persist_turn",
-            "abstain": "abstain",
-        },
-    )
+    builder.add_edge("trim_answer", "persist_turn")
     builder.add_edge("abstain", "persist_turn")
     builder.add_edge("persist_turn", END)
     return builder.compile(checkpointer=checkpointer)
@@ -261,10 +250,10 @@ def _verify_support_node(support_verifier: LLMSupportVerifier):
 
 
 def _select_support_action(state: AgentState) -> str:
-    """Route based on the support reflection: verify, retry, trim, or abstain."""
+    """Route based on the support reflection: persist, retry, trim, or abstain."""
     support_status = state.get("support_status")
     if support_status == "supported":
-        return "verify"
+        return "persist"
     if support_status in {"partially_supported", "unsupported"}:
         if int(state.get("retrieval_attempts", 0)) < MAX_RETRIEVAL_ATTEMPTS:
             return "retry"
@@ -305,36 +294,6 @@ def _trim_answer_node(support_verifier: LLMSupportVerifier):
     return run_trim_answer
 
 
-def _verify_utility_node(utility_verifier: LLMUtilityVerifier):
-    """Create the node that verifies whether a supported answer is useful."""
-    def run_verify_utility(state: AgentState) -> dict[str, Any]:
-        response = state.get("response")
-        if not isinstance(response, Mapping) or not isinstance(response.get("answer"), str):
-            raise RuntimeError("Utility verification requires a generated answer")
-        decision = utility_verifier.verify(
-            state["original_query"],
-            response["answer"],
-            state.get("support_claims", []),
-        )
-        return {
-            "utility_status": decision.status,
-            "utility_missing_requirements": list(decision.missing_requirements),
-            "utility_reason": decision.reason,
-        }
-
-    return run_verify_utility
-
-
-def _select_utility_action(state: AgentState) -> str:
-    """Persist only supported answers that directly address the request."""
-    utility_status = state.get("utility_status")
-    if utility_status == "useful":
-        return "persist"
-    if utility_status == "not_useful":
-        return "abstain"
-    raise RuntimeError("Utility verifier did not return a supported status")
-
-
 def _persist_turn_node(context_manager: ContextManager):
     """Create the node that persists the final user and assistant messages."""
     def run_persist_turn(state: AgentState) -> dict[str, Any]:
@@ -345,9 +304,7 @@ def _persist_turn_node(context_manager: ContextManager):
 
 def _abstain_node(state: AgentState) -> dict[str, ResponseState]:
     """Return a clear response when a reflection rejects the current answer."""
-    if state.get("utility_status") == "not_useful":
-        answer = "The generated answer does not fully address the question."
-    elif state.get("support_status") in {"partially_supported", "unsupported"}:
+    if state.get("support_status") in {"partially_supported", "unsupported"}:
         answer = "The generated answer could not be fully supported by the retrieved documents."
     elif state.get("retrieval_action") == "retrieve":
         answer = "The retrieved documents do not contain a passage relevant to this question."

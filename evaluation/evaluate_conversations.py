@@ -23,7 +23,6 @@ from src.agent.relevance import LLMRelevanceGrader
 from src.agent.rewrite import LLMQueryRewriter
 from src.agent.routes import LLMRetrievalGate
 from src.agent.support import LLMSupportVerifier
-from src.agent.utility import LLMUtilityVerifier
 from src.core.config import PROJECT_ROOT, Config
 from src.core.logger import setup_logging
 from src.pipeline.query_runtime import build_query_pipeline
@@ -275,7 +274,6 @@ def _build_graph(config: Config) -> Any:
         query_rewriter=LLMQueryRewriter(pipeline.llm),
         relevance_grader=LLMRelevanceGrader(pipeline.llm),
         support_verifier=LLMSupportVerifier(pipeline.llm),
-        utility_verifier=LLMUtilityVerifier(pipeline.llm),
         checkpointer=InMemorySaver(),
     )
 
@@ -390,9 +388,6 @@ def _score_turn(
     support_status_matches = (
         state.get("support_status") == "supported" if relevant_ids else None
     )
-    utility_status_matches = (
-        state.get("utility_status") == "useful" if relevant_ids else None
-    )
     action_matches = observed_action == expected_action
     abstention_matches = abstention_detected == expected_abstention
     automated_success = (
@@ -402,7 +397,6 @@ def _score_turn(
         and relevance_status_matches
         and (relevance_hit is not False)
         and (support_status_matches is not False)
-        and (utility_status_matches is not False)
         and (evidence_hit is not False)
         and abstention_matches
     )
@@ -435,11 +429,6 @@ def _score_turn(
             "support_status": state.get("support_status"),
             "support_claims": state.get("support_claims", []),
             "support_reason": _optional_string(state.get("support_reason")),
-            "utility_status": state.get("utility_status"),
-            "utility_missing_requirements": state.get(
-                "utility_missing_requirements", []
-            ),
-            "utility_reason": _optional_string(state.get("utility_reason")),
             "answer": answer,
             "sources": source_records,
             "refusal_detected": abstention_detected,
@@ -452,7 +441,6 @@ def _score_turn(
             "relevance_hit": relevance_hit,
             "relevance_status_matches": relevance_status_matches,
             "support_status_matches": support_status_matches,
-            "utility_status_matches": utility_status_matches,
             "abstention_matches": abstention_matches,
         },
         "automated_success": automated_success,
@@ -477,7 +465,6 @@ def _failed_turn_result(
             "relevance_hit": False,
             "relevance_status_matches": False,
             "support_status_matches": False,
-            "utility_status_matches": False,
             "evidence_hit": False,
             "abstention_matches": False,
         },
@@ -568,9 +555,6 @@ def _aggregate_metrics(trajectory_results: Sequence[Mapping[str, Any]]) -> dict[
         ),
         "answerable_support_rate": _check_rate(
             answerable_turns, "support_status_matches"
-        ),
-        "answerable_utility_rate": _check_rate(
-            answerable_turns, "utility_status_matches"
         ),
         "grounded_abstention_accuracy": _check_rate(
             unanswerable_turns, "abstention_matches"
