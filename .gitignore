@@ -1,6 +1,7 @@
 data/raw/
 data/processed/
 data/chroma_db/
+data/checkpoints.sqlite
 logs/
 .env
 venv/
@@ -25,3 +26,6 @@ output/
 test_*.py
 
 *.json
+agentic_rag.md
+UI.md
+checkpoints*
