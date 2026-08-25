@@ -21,6 +21,13 @@ The goal is not just to produce answers, but to make the whole RAG pipeline meas
 
 ## Architecture
 
+The project has two layers: an offline indexing pipeline that builds the
+retrieval index, and an online RAG pipeline that answers questions from it.
+A stateful Self-RAG agent (`src/agent/`) wraps the online pipeline with
+query rewriting, retrieval gating, and grounding verification for multi-turn
+conversations; a single-shot CLI (`main.py`) calls the RAG pipeline directly
+without the agent layer.
+
 ```mermaid
 flowchart TD
     A[PDF / Word documents] --> B[Document parsers]
@@ -39,6 +46,45 @@ flowchart TD
     M --> N[LLM]
     N --> O[Grounded answer + sources]
 ```
+
+The RAG pipeline above (`src/retrieval/` + `src/generation/`, assembled by
+`src/pipeline/query_runtime.py`) is reused as a single node inside the
+stateful multi-turn agent graph (`src/agent/graph.py`, built with
+LangGraph):
+
+```mermaid
+flowchart TD
+    U[User question] --> CM[Context manager\nbound conversation history]
+    CM --> RG[Retrieval gate\nretrieve vs abstain]
+    RG -->|retrieve| QR[Query rewriter\nresolve references from history]
+    RG -->|abstain| AB[Abstain]
+    QR --> RAG["RAG pipeline retrieve + rerank\n(see diagram above)"]
+    RAG --> REL[Relevance grader]
+    REL -->|relevant| GEN[Generate answer]
+    REL -->|none relevant| AB
+    GEN --> SUP[Support verifier]
+    SUP -->|supported| UTIL[Utility verifier]
+    SUP -->|partially supported| TRIM[Trim to supported claims]
+    SUP -->|unsupported/partial, retries left| QR
+    SUP -->|unsupported, retries exhausted| AB
+    SUP -->|partially supported, retries exhausted| TRIM
+    TRIM --> UTIL
+    UTIL -->|useful| PERSIST[Persist turn to conversation history]
+    UTIL -->|not useful| AB
+    AB --> PERSIST
+    PERSIST --> ANS[Grounded answer + sources]
+```
+
+Two entry points drive this agent graph:
+
+- `app.py` — Streamlit chat UI, conversation history persisted per-thread to
+  `data/checkpoints.sqlite` via `langgraph.checkpoint.sqlite.SqliteSaver`.
+- `evaluation/evaluate_conversations.py` — scores labeled multi-turn
+  trajectories against this same graph (see "Multi-Turn Conversation
+  Evaluation Baseline" below).
+
+`main.py` bypasses the agent graph and calls the RAG pipeline directly for a
+single, stateless question.
 
 Evaluation flow:
 
@@ -69,7 +115,7 @@ flowchart TD
 ```text
 config/          YAML configuration
 data/raw/        Source PDF and Word files
-evaluation/      Annotated test queries and evaluation scripts
+evaluation/      Annotated test queries, conversation trajectories, and evaluation scripts
 prompts/         Prompt templates
 scripts/         Utility scripts for annotation
 src/core/        Config and logging
@@ -77,7 +123,10 @@ src/document/    Parsing and chunking
 src/retrieval/   Dense, BM25, hybrid, and reranking
 src/generation/  Prompting, LLM wrapper, and RAG pipeline
 src/pipeline/    Offline indexing and online query runtime assembly
-main.py          CLI entry point
+src/agent/       Stateful Self-RAG LangGraph: retrieval gating, query
+                 rewriting, relevance/support/utility verification
+app.py           Streamlit chat UI for the agent
+main.py          CLI entry point (single-shot RAG pipeline, no agent)
 ```
 
 ## Setup
