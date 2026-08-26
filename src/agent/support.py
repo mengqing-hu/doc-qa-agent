@@ -28,12 +28,9 @@ one value as definitive despite conflicting evidence. If passages disagree,
 an answer that explicitly attributes each value to its source and reports the
 discrepancy is supported; do not mark an attributed value unsupported merely
 because another passage contains a different value. Do not judge writing
-quality or whether the answer is useful. Treat a name variant (for example,
-a model, method, or dataset name with an added qualifier such as a depth,
-version, or size suffix) as referring to the same entity only when the
-supplied passages establish that relationship — for example, one passage
-describes the base architecture and another passage names the specific
-configured variant. Keep a parameter value and its stated rationale as
+quality or whether the answer is useful. Treat a name variant as referring to
+the same entity only when the supplied passages establish that relationship.
+Keep a parameter value and its stated rationale as
 separate claims so that an explicitly stated rationale can be supported
 even when the entity name appears only in a neighboring passage.
 

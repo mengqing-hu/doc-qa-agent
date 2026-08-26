@@ -12,24 +12,28 @@ from src.agent.state import ConversationMessage
 from src.generation.llm import LLM
 
 
-RetrievalAction = Literal["retrieve", "abstain"]
-SUPPORTED_RETRIEVAL_ACTIONS = frozenset({"retrieve", "abstain"})
+RetrievalAction = Literal["retrieve", "chitchat", "abstain"]
+SUPPORTED_RETRIEVAL_ACTIONS = frozenset({"retrieve", "chitchat", "abstain"})
 CODE_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 RETRIEVAL_GATE_PROMPT = """You are the retrieval gate for a document question-answering application.
 
-Choose exactly one retrieval action:
+Choose exactly one action:
 - retrieve: a factual or explanatory request that may plausibly benefit from
   retrieval over the indexed documents.
-- abstain: a request that is clearly unrelated to document QA, including
-  social conversation, real-time external information, external actions,
-  software creation, and image generation. Also choose abstain when a
-  pronoun or omitted entity cannot be resolved from the current request and
-  conversation history.
+- chitchat: social pleasantries (greetings, thanks, small talk), a question
+  about this conversation itself, or a general-knowledge question that does
+  not require the indexed documents. These are answered directly, without
+  retrieval and without document evidence.
+- abstain: a request the assistant should refuse outright, including
+  real-time external information, external actions, software creation, and
+  image generation. Also choose abstain when a pronoun or omitted entity
+  cannot be resolved from the current request and conversation history.
 
 Decide whether to attempt retrieval, not whether the documents will definitely
 contain the answer. Do not abstain merely because the documents may lack the
 answer. When an information request could plausibly benefit from retrieval,
-choose retrieve.
+choose retrieve. Only choose chitchat when the request is clearly not about
+the indexed documents.
 
 Classify the current request first. Use history only to resolve references or
 omitted entities. Do not let prior conversation change the scope of a
@@ -37,7 +41,7 @@ standalone new topic.
 
 Return only a JSON object with this exact schema:
 {{
-  "action": "retrieve | abstain",
+  "action": "retrieve | chitchat | abstain",
   "confidence": 0.0,
   "reason": "A concise explanation in English."
 }}

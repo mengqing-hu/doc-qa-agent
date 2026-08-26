@@ -29,3 +29,5 @@ test_*.py
 agentic_rag.md
 UI.md
 checkpoints*
+
+diagram.md
