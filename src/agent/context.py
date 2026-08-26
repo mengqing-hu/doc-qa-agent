@@ -10,13 +10,14 @@ from src.core.config import Config
 
 
 DEFAULT_MAX_HISTORY_MESSAGES = 8
+DEFAULT_MAX_ITERATIONS = 4
 
 
 class ContextManager:
     """Store recent conversation messages in checkpoint-compatible state."""
 
     def __init__(self, config: Config) -> None:
-        """Read the maximum number of recent messages retained per thread."""
+        """Read the conversation-history and iteration budget settings."""
         self.max_history_messages = int(
             config.get(
                 "agent",
@@ -27,9 +28,14 @@ class ContextManager:
         )
         if self.max_history_messages <= 0:
             raise ValueError("agent.context.max_history_messages must be greater than zero")
+        self.max_iterations = int(
+            config.get("agent", "max_iterations", default=DEFAULT_MAX_ITERATIONS)
+        )
+        if self.max_iterations <= 0:
+            raise ValueError("agent.max_iterations must be greater than zero")
 
     def prepare_query(self, state: AgentState) -> dict[str, Any]:
-        """Store the current user request and select prior messages for rewriting."""
+        """Store the current user request and reset this turn's ReAct loop state."""
         question = state["question"].strip()
         if not question:
             raise ValueError("question must not be empty")
@@ -37,24 +43,14 @@ class ContextManager:
         history = _history_from_state(state)
         return {
             "original_query": question,
-            "rewritten_query": question,
-            "rewrite_used_conversation_context": False,
-            "rewrite_reason": "Query rewriting has not run for this turn.",
             "conversation_context": history[-self.max_history_messages :],
             "conversation_history": _trim_history(
                 [*history, {"role": "user", "content": question}],
                 self.max_history_messages,
             ),
-            "retrieved_chunks": [],
-            "retrieval_attempts": 0,
-            "relevant_chunks": [],
-            "relevant_chunk_ids": [],
-            "relevance_decisions": [],
-            "relevance_status": "none",
-            "relevance_reason": "Relevance grading has not run for this turn.",
-            "support_status": "pending",
-            "support_claims": [],
-            "support_reason": "Support verification has not run for this turn.",
+            "iteration_count": 0,
+            "max_iterations": self.max_iterations,
+            "scratchpad": [],
         }
 
     def persist_response(self, state: AgentState) -> dict[str, list[ConversationMessage]]:

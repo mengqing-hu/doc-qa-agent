@@ -1,4 +1,4 @@
-"""Build the initial LangGraph wrapper around the existing RAG pipeline."""
+"""Build the ReAct + Self-RAG graph around the existing RAG pipeline."""
 
 from __future__ import annotations
 
@@ -8,17 +8,23 @@ from typing import Any
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
+from src.agent.actions import LLMActionSelector
+from src.agent.chitchat import LLMChitchatResponder
 from src.agent.context import ContextManager
 from src.agent.relevance import LLMRelevanceGrader
-from src.agent.rewrite import LLMQueryRewriter
 from src.agent.routes import LLMRetrievalGate, RetrievalAction
-from src.agent.state import AgentState, ConversationMessage, ResponseState
+from src.agent.state import AgentState, ConversationMessage, ScratchpadEntry, ResponseState
 from src.agent.support import LLMSupportVerifier
+from src.agent.tools.base import Tool
 from src.generation.rag_pipeline import RAGPipeline
 from src.generation.response import RAGResponse, SourceReference
 
 
-MAX_RETRIEVAL_ATTEMPTS = 2
+OTHER_ACTION: dict[str, str] = {
+    "vector_retrieve": "web_search",
+    "web_search": "vector_retrieve",
+}
+MAX_TOOL_ATTEMPTS_PER_ITERATION = 2
 
 
 def build_agent_graph(
@@ -26,55 +32,62 @@ def build_agent_graph(
     *,
     retrieval_gate: LLMRetrievalGate,
     context_manager: ContextManager,
-    query_rewriter: LLMQueryRewriter,
+    chitchat_responder: LLMChitchatResponder,
+    action_selector: LLMActionSelector,
     relevance_grader: LLMRelevanceGrader,
     support_verifier: LLMSupportVerifier,
+    vector_retrieve_tool: Tool,
+    web_search_tool: Tool,
     checkpointer: BaseCheckpointSaver | None = None,
 ) -> Any:
-    """Compile the complete Self-RAG reflection workflow."""
+    """Compile the ReAct + Self-RAG reasoning workflow."""
     builder = StateGraph(AgentState)
-    builder.add_node("retrieval_gate", _retrieval_gate_node(retrieval_gate))
     builder.add_node("context_manager", _context_manager_node(context_manager))
-    builder.add_node("query_rewriter", _query_rewriter_node(query_rewriter))
-    builder.add_node("retrieve", _retrieve_node(pipeline))
+    builder.add_node("retrieval_gate", _retrieval_gate_node(retrieval_gate))
+    builder.add_node("chitchat", _chitchat_node(chitchat_responder))
+    builder.add_node("select_action", _select_action_node(action_selector))
+    builder.add_node(
+        "run_action", _run_action_node(vector_retrieve_tool, web_search_tool)
+    )
     builder.add_node("grade_relevance", _grade_relevance_node(relevance_grader))
-    builder.add_node("generate", _generate_node(pipeline))
-    builder.add_node("verify_support", _verify_support_node(support_verifier))
-    builder.add_node("trim_answer", _trim_answer_node(support_verifier))
+    builder.add_node("generate_answer", _generate_answer_node(pipeline))
+    builder.add_node("verify_answer", _verify_answer_node(support_verifier))
+    builder.add_node("record_evidence", _record_evidence_node)
+    builder.add_node("finish_answer", _finish_answer_node)
     builder.add_node("abstain", _abstain_node)
     builder.add_node("persist_turn", _persist_turn_node(context_manager))
+
     builder.add_edge(START, "context_manager")
     builder.add_edge("context_manager", "retrieval_gate")
     builder.add_conditional_edges(
         "retrieval_gate",
         _select_retrieval_action,
-        {
-            "retrieve": "query_rewriter",
-            "abstain": "abstain",
-        },
+        {"retrieve": "select_action", "chitchat": "chitchat", "abstain": "abstain"},
     )
-    builder.add_edge("query_rewriter", "retrieve")
-    builder.add_edge("retrieve", "grade_relevance")
+    builder.add_edge("chitchat", "persist_turn")
+    builder.add_conditional_edges(
+        "select_action",
+        _select_after_action,
+        {"finish": "finish_answer", "retrieve": "run_action"},
+    )
+    builder.add_edge("run_action", "grade_relevance")
     builder.add_conditional_edges(
         "grade_relevance",
-        _select_relevance_action,
-        {
-            "generate": "generate",
-            "abstain": "abstain",
-        },
+        _select_after_relevance,
+        {"generate": "generate_answer", "retry": "run_action", "abstain": "abstain"},
     )
-    builder.add_edge("generate", "verify_support")
+    builder.add_edge("generate_answer", "verify_answer")
     builder.add_conditional_edges(
-        "verify_support",
-        _select_support_action,
-        {
-            "persist": "persist_turn",
-            "trim": "trim_answer",
-            "retry": "query_rewriter",
-            "abstain": "abstain",
-        },
+        "verify_answer",
+        _select_after_support,
+        {"record": "record_evidence", "retry": "run_action", "abstain": "abstain"},
     )
-    builder.add_edge("trim_answer", "persist_turn")
+    builder.add_conditional_edges(
+        "record_evidence",
+        _select_after_record,
+        {"continue": "select_action", "abstain": "abstain"},
+    )
+    builder.add_edge("finish_answer", "persist_turn")
     builder.add_edge("abstain", "persist_turn")
     builder.add_edge("persist_turn", END)
     return builder.compile(checkpointer=checkpointer)
@@ -97,7 +110,7 @@ def invoke_agent_graph(
         {"question": normalized_question},
         config={
             "run_name": "agentic_rag",
-            "tags": ["agentic-rag"],
+            "tags": ["agentic-rag", "react"],
             "metadata": {"thread_id": thread_id},
             "configurable": {"thread_id": thread_id},
         },
@@ -110,6 +123,7 @@ def invoke_agent_graph(
 
 def _retrieval_gate_node(retrieval_gate: LLMRetrievalGate):
     """Create the node that records the selected retrieval action."""
+
     def run_retrieval_gate(state: AgentState) -> dict[str, str | float]:
         decision = retrieval_gate.decide(
             state["original_query"],
@@ -134,75 +148,96 @@ def _user_messages(
 def _select_retrieval_action(state: AgentState) -> RetrievalAction:
     """Return the validated retrieval action used by conditional edges."""
     action = state.get("retrieval_action")
-    if action in {"retrieve", "abstain"}:
+    if action in {"retrieve", "chitchat", "abstain"}:
         return action
     raise RuntimeError("Retrieval gate did not return a supported action")
 
 
+def _chitchat_node(chitchat_responder: LLMChitchatResponder):
+    """Create the node that answers requests that need no document evidence."""
+
+    def run_chitchat(state: AgentState) -> dict[str, ResponseState]:
+        reply = chitchat_responder.respond(
+            state["original_query"], state.get("conversation_context", [])
+        )
+        return {"response": {"answer": reply, "sources": []}}
+
+    return run_chitchat
+
+
 def _context_manager_node(context_manager: ContextManager):
-    """Create the node that prepares bounded history for routing and rewriting."""
+    """Create the node that prepares bounded history and resets loop state."""
+
     def run_context_manager(state: AgentState) -> dict[str, Any]:
         return context_manager.prepare_query(state)
 
     return run_context_manager
 
 
-def _query_rewriter_node(query_rewriter: LLMQueryRewriter):
-    """Create the node that resolves references in document retrieval queries."""
-    def run_query_rewriter(state: AgentState) -> dict[str, str | bool]:
-        retry_feedback = (
-            state.get("support_reason")
-            if state.get("support_status") in {"unsupported", "partially_supported"}
-            else None
-        )
-        decision = query_rewriter.rewrite(
-            state["original_query"],
-            state.get("conversation_context", []),
-            retry_feedback=retry_feedback,
+def _select_action_node(action_selector: LLMActionSelector):
+    """Create the node that picks the next Thought+Action pair."""
+
+    def run_select_action(state: AgentState) -> dict[str, Any]:
+        decision = action_selector.select(
+            state["original_query"], state.get("scratchpad", [])
         )
         return {
-            "rewritten_query": decision.rewritten_query,
-            "rewrite_used_conversation_context": decision.used_conversation_context,
-            "rewrite_reason": decision.reason,
+            "action": decision.action,
+            "action_input": decision.action_input,
+            "action_thought": decision.thought,
+            "tool_attempts": 0,
         }
 
-    return run_query_rewriter
+    return run_select_action
 
 
-def _retrieve_node(pipeline: RAGPipeline):
-    """Create the node that retrieves and reranks one evidence candidate set."""
-    def run_retrieve(state: AgentState) -> dict[str, Any]:
-        retrieval_attempts = int(state.get("retrieval_attempts", 0)) + 1
+def _select_after_action(state: AgentState) -> str:
+    """Route to finishing the trajectory or running the chosen retrieval tool."""
+    action = state.get("action")
+    if action == "finish":
+        return "finish"
+    if action in OTHER_ACTION:
+        return "retrieve"
+    raise RuntimeError("Action selector did not return a supported action")
+
+
+def _run_action_node(vector_retrieve_tool: Tool, web_search_tool: Tool):
+    """Create the node that executes the selected (or retried) retrieval tool."""
+    tools: dict[str, Tool] = {
+        "vector_retrieve": vector_retrieve_tool,
+        "web_search": web_search_tool,
+    }
+
+    def run_action(state: AgentState) -> dict[str, Any]:
+        attempts = int(state.get("tool_attempts", 0))
+        chosen_action = (
+            state["action"] if attempts == 0 else OTHER_ACTION[state["action"]]
+        )
+        try:
+            evidence = tools[chosen_action].run(state["action_input"])
+        except Exception:
+            evidence = []
         return {
-            "retrieved_chunks": pipeline.retrieve(state["rewritten_query"]),
-            "retrieval_attempts": retrieval_attempts,
+            "current_action": chosen_action,
+            "current_evidence": evidence,
+            "tool_attempts": attempts + 1,
         }
 
-    return run_retrieve
+    return run_action
 
 
 def _grade_relevance_node(relevance_grader: LLMRelevanceGrader):
-    """Create the node that filters retrieved passages using the Rel reflection."""
+    """Create the node that filters this iteration's evidence for relevance."""
+
     def run_grade_relevance(state: AgentState) -> dict[str, Any]:
-        retrieved_chunks = state.get("retrieved_chunks", [])
-        decision = relevance_grader.grade(state["rewritten_query"], retrieved_chunks)
-        relevant_chunk_ids = set(decision.relevant_chunk_ids)
-        relevance_decisions = [
-            {
-                "chunk_id": passage.chunk_id,
-                "relevance": passage.relevance,
-                "reason": passage.reason,
-            }
-            for passage in decision.passages
+        evidence = state.get("current_evidence", [])
+        decision = relevance_grader.grade(state["action_input"], evidence)
+        relevant_ids = set(decision.relevant_chunk_ids)
+        relevant_evidence = [
+            item for item in evidence if item["chunk_id"] in relevant_ids
         ]
         return {
-            "relevant_chunks": [
-                chunk
-                for chunk in retrieved_chunks
-                if str(chunk.get("chunk_id")) in relevant_chunk_ids
-            ],
-            "relevant_chunk_ids": list(decision.relevant_chunk_ids),
-            "relevance_decisions": relevance_decisions,
+            "relevant_evidence": relevant_evidence,
             "relevance_status": decision.status,
             "relevance_reason": decision.reason,
         }
@@ -210,143 +245,119 @@ def _grade_relevance_node(relevance_grader: LLMRelevanceGrader):
     return run_grade_relevance
 
 
-def _select_relevance_action(state: AgentState) -> str:
-    """Select generation only when at least one passage is relevant."""
-    relevance_status = state.get("relevance_status")
-    if relevance_status == "relevant":
+def _select_after_relevance(state: AgentState) -> str:
+    """Route to generation, a same-iteration retry, or abstention."""
+    if state.get("relevance_status") == "relevant":
         return "generate"
-    if relevance_status == "none":
+    if int(state.get("tool_attempts", 0)) >= MAX_TOOL_ATTEMPTS_PER_ITERATION:
         return "abstain"
-    raise RuntimeError("Relevance grader did not return a supported status")
+    return "retry"
 
 
-def _verify_support_node(support_verifier: LLMSupportVerifier):
-    """Create the node that verifies generated claims against relevant chunks."""
-    def run_verify_support(state: AgentState) -> dict[str, Any]:
-        response = state.get("response")
-        if not isinstance(response, Mapping) or not isinstance(response.get("answer"), str):
-            raise RuntimeError("Support verification requires a generated answer")
+def _generate_answer_node(pipeline: RAGPipeline):
+    """Create the node that extracts one fact from this iteration's evidence."""
+
+    def run_generate_answer(state: AgentState) -> dict[str, Any]:
+        response = pipeline.generate(
+            state["action_input"], state.get("relevant_evidence", [])
+        )
+        return {
+            "current_fact": response.answer,
+            "current_sources": [
+                {
+                    "chunk_id": source.chunk_id,
+                    "source": source.source,
+                    "page": source.page,
+                    "section_title": source.section_title,
+                }
+                for source in response.sources
+            ],
+        }
+
+    return run_generate_answer
+
+
+def _verify_answer_node(support_verifier: LLMSupportVerifier):
+    """Create the node that checks this iteration's fact against its evidence."""
+
+    def run_verify_answer(state: AgentState) -> dict[str, Any]:
         decision = support_verifier.verify(
-            state["rewritten_query"],
-            response["answer"],
-            state.get("relevant_chunks", []),
-            state.get("conversation_context", []),
+            state["action_input"],
+            state["current_fact"],
+            state.get("relevant_evidence", []),
         )
         return {
             "support_status": decision.status,
-            "support_claims": [
-                {
-                    "claim": claim.claim,
-                    "support": claim.support,
-                    "chunk_ids": list(claim.chunk_ids),
-                    "reason": claim.reason,
-                }
-                for claim in decision.claims
-            ],
             "support_reason": decision.reason,
         }
 
-    return run_verify_support
+    return run_verify_answer
 
 
-def _select_support_action(state: AgentState) -> str:
-    """Route based on the support reflection: persist, retry, trim, or abstain."""
-    support_status = state.get("support_status")
-    if support_status == "supported":
-        return "persist"
-    if support_status in {"partially_supported", "unsupported"}:
-        if int(state.get("retrieval_attempts", 0)) < MAX_RETRIEVAL_ATTEMPTS:
-            return "retry"
-        if support_status == "partially_supported":
-            return "trim"
+def _select_after_support(state: AgentState) -> str:
+    """Route to recording the evidence, a same-iteration retry, or abstention."""
+    if state.get("support_status") == "supported":
+        return "record"
+    if int(state.get("tool_attempts", 0)) >= MAX_TOOL_ATTEMPTS_PER_ITERATION:
         return "abstain"
-    raise RuntimeError("Support verifier did not return a supported status")
+    return "retry"
 
 
-def _trim_answer_node(support_verifier: LLMSupportVerifier):
-    """Create the node that rewrites a partially supported answer."""
-    def run_trim_answer(state: AgentState) -> dict[str, ResponseState]:
-        response = state.get("response")
-        if not isinstance(response, Mapping) or not isinstance(response.get("answer"), str):
-            raise RuntimeError("Trimming requires a generated answer")
-        trimmed_answer = support_verifier.trim_to_supported_claims(
-            state["original_query"],
-            response["answer"],
-            state.get("support_claims", []),
+def _record_evidence_node(state: AgentState) -> dict[str, Any]:
+    """Append this iteration's verified fact to the scratchpad."""
+    entry: ScratchpadEntry = {
+        "thought": state.get("action_thought", ""),
+        "action": state["current_action"],
+        "action_input": state["action_input"],
+        "fact": state["current_fact"],
+        "sources": state.get("current_sources", []),
+    }
+    return {
+        "scratchpad": [*state.get("scratchpad", []), entry],
+        "iteration_count": int(state.get("iteration_count", 0)) + 1,
+    }
+
+
+def _select_after_record(state: AgentState) -> str:
+    """Enforce the hard iteration cap before returning to action selection."""
+    if int(state.get("iteration_count", 0)) >= int(state.get("max_iterations", 0)):
+        return "abstain"
+    return "continue"
+
+
+def _finish_answer_node(state: AgentState) -> dict[str, ResponseState]:
+    """Build the final response from the model's chosen finish action."""
+    seen_chunk_ids: set[str] = set()
+    sources = []
+    for entry in state.get("scratchpad", []):
+        for source in entry.get("sources", []):
+            if source["chunk_id"] not in seen_chunk_ids:
+                seen_chunk_ids.add(source["chunk_id"])
+                sources.append(source)
+    return {"response": {"answer": state["action_input"], "sources": sources}}
+
+
+def _abstain_node(state: AgentState) -> dict[str, ResponseState]:
+    """Return a grounded refusal when the gate, tools, or budget close off an answer."""
+    if state.get("retrieval_action") == "abstain":
+        answer = "I can only answer questions about the indexed documents."
+    elif int(state.get("iteration_count", 0)) >= int(state.get("max_iterations", 0)):
+        answer = "This question could not be answered within the allowed number of reasoning steps."
+    else:
+        answer = (
+            "The retrieved documents and web search did not contain evidence "
+            "that supports an answer to this question."
         )
-        supported_chunk_ids = {
-            chunk_id
-            for claim in state.get("support_claims", [])
-            if claim.get("support") == "supported"
-            for chunk_id in claim.get("chunk_ids", [])
-        }
-        return {
-            "response": {
-                "answer": trimmed_answer,
-                "sources": [
-                    source
-                    for source in response.get("sources", [])
-                    if source.get("chunk_id") in supported_chunk_ids
-                ],
-            }
-        }
-
-    return run_trim_answer
+    return {"response": {"answer": answer, "sources": []}}
 
 
 def _persist_turn_node(context_manager: ContextManager):
     """Create the node that persists the final user and assistant messages."""
+
     def run_persist_turn(state: AgentState) -> dict[str, Any]:
         return context_manager.persist_response(state)
 
     return run_persist_turn
-
-
-def _abstain_node(state: AgentState) -> dict[str, ResponseState]:
-    """Return a clear response when a reflection rejects the current answer."""
-    if state.get("support_status") in {"partially_supported", "unsupported"}:
-        answer = "The generated answer could not be fully supported by the retrieved documents."
-    elif state.get("retrieval_action") == "retrieve":
-        answer = "The retrieved documents do not contain a passage relevant to this question."
-    else:
-        answer = "I can only answer questions about the indexed documents."
-    return {
-        "response": {
-            "answer": answer,
-            "sources": [],
-        }
-    }
-
-
-def _generate_node(pipeline: RAGPipeline):
-    """Create the node that generates an answer from relevant chunks only."""
-    def run_generate(state: AgentState) -> dict[str, ResponseState]:
-        return {
-            "response": _response_to_state(
-                pipeline.generate(
-                    state["rewritten_query"],
-                    state.get("relevant_chunks", []),
-                )
-            )
-        }
-
-    return run_generate
-
-
-def _response_to_state(response: RAGResponse) -> ResponseState:
-    """Convert a public response into checkpoint-compatible graph state."""
-    return {
-        "answer": response.answer,
-        "sources": [
-            {
-                "chunk_id": source.chunk_id,
-                "source": source.source,
-                "page": source.page,
-                "section_title": source.section_title,
-            }
-            for source in response.sources
-        ],
-    }
 
 
 def _response_from_state(response_state: Mapping[str, Any]) -> RAGResponse:

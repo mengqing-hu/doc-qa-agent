@@ -9,13 +9,15 @@ import uuid
 import streamlit as st
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from src.agent.actions import LLMActionSelector
+from src.agent.chitchat import LLMChitchatResponder
 from src.agent.context import ContextManager
 from src.agent.graph import build_agent_graph, invoke_agent_graph
 from src.agent.relevance import LLMRelevanceGrader
-from src.agent.rewrite import LLMQueryRewriter
 from src.agent.routes import LLMRetrievalGate
 from src.agent.support import LLMSupportVerifier
-from src.agent.utility import LLMUtilityVerifier
+from src.agent.tools.vector_retrieve import VectorRetrieveTool
+from src.agent.tools.web_search import WebSearchTool
 from src.core.config import PROJECT_ROOT, Config
 from src.core.logger import setup_logging
 from src.pipeline.query_runtime import build_query_pipeline
@@ -60,10 +62,12 @@ def _load_graph():
         pipeline,
         retrieval_gate=LLMRetrievalGate(pipeline.llm),
         context_manager=ContextManager(config),
-        query_rewriter=LLMQueryRewriter(pipeline.llm),
+        chitchat_responder=LLMChitchatResponder(pipeline.llm),
+        action_selector=LLMActionSelector(pipeline.llm),
         relevance_grader=LLMRelevanceGrader(pipeline.llm),
         support_verifier=LLMSupportVerifier(pipeline.llm),
-        utility_verifier=LLMUtilityVerifier(pipeline.llm),
+        vector_retrieve_tool=VectorRetrieveTool(pipeline),
+        web_search_tool=WebSearchTool(config),
         checkpointer=checkpointer,
     )
 
@@ -84,25 +88,21 @@ def _render_sidebar(owner_uid: str) -> None:
 
 
 def _render_reasoning_trace(state: dict) -> None:
-    """Show this turn's Ret/Rel/Sup/Use decisions in a collapsed panel."""
+    """Show this turn's retrieval decision and ReAct trajectory in a collapsed panel."""
     with st.expander("Reasoning trace"):
         st.markdown(
-            f"**[Ret] Retrieval decision**: `{state.get('retrieval_action')}` "
+            f"**Retrieval decision**: `{state.get('retrieval_action')}` "
             f"(confidence {state.get('retrieval_confidence')})  \n{state.get('retrieval_reason')}"
         )
-        st.markdown(f"**Rewritten query**: {state.get('rewritten_query')}")
         st.markdown(
-            f"**[Rel] Relevance verdict**: `{state.get('relevance_status')}`  \n"
-            f"{state.get('relevance_reason')}"
+            f"**Iterations used**: {state.get('iteration_count')} / {state.get('max_iterations')}"
         )
-        st.markdown(
-            f"**[Sup] Support verdict**: `{state.get('support_status')}`  \n"
-            f"{state.get('support_reason')}"
-        )
-        st.markdown(
-            f"**[Use] Utility verdict**: `{state.get('utility_status')}`  \n"
-            f"{state.get('utility_reason')}"
-        )
+        for index, entry in enumerate(state.get("scratchpad", []), start=1):
+            st.markdown(
+                f"**Step {index}** (`{entry.get('action')}`): {entry.get('action_input')}  \n"
+                f"Thought: {entry.get('thought')}  \n"
+                f"Observation: {entry.get('fact')}"
+            )
 
 
 def _format_sources(sources) -> str:

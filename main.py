@@ -6,12 +6,15 @@ import argparse
 
 from langgraph.checkpoint.memory import InMemorySaver
 
+from src.agent.actions import LLMActionSelector
+from src.agent.chitchat import LLMChitchatResponder
 from src.agent.context import ContextManager
 from src.agent.graph import build_agent_graph, invoke_agent_graph
 from src.agent.relevance import LLMRelevanceGrader
-from src.agent.rewrite import LLMQueryRewriter
 from src.agent.routes import LLMRetrievalGate
 from src.agent.support import LLMSupportVerifier
+from src.agent.tools.vector_retrieve import VectorRetrieveTool
+from src.agent.tools.web_search import WebSearchTool
 from src.core.config import Config
 from src.core.logger import setup_logging
 from src.pipeline.query_runtime import build_query_pipeline
@@ -27,9 +30,12 @@ def main() -> None:
         pipeline,
         retrieval_gate=LLMRetrievalGate(pipeline.llm),
         context_manager=ContextManager(config),
-        query_rewriter=LLMQueryRewriter(pipeline.llm),
+        chitchat_responder=LLMChitchatResponder(pipeline.llm),
+        action_selector=LLMActionSelector(pipeline.llm),
         relevance_grader=LLMRelevanceGrader(pipeline.llm),
         support_verifier=LLMSupportVerifier(pipeline.llm),
+        vector_retrieve_tool=VectorRetrieveTool(pipeline),
+        web_search_tool=WebSearchTool(config),
         checkpointer=InMemorySaver(),
     )
     response = invoke_agent_graph(

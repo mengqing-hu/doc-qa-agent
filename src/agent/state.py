@@ -28,8 +28,27 @@ class ConversationMessage(TypedDict):
     content: str
 
 
+class Evidence(TypedDict):
+    """Store one piece of evidence in a shape shared by RAG and web results."""
+
+    chunk_id: str
+    text: str
+    origin: Literal["rag", "web"]
+    metadata: dict[str, Any]
+
+
+class ScratchpadEntry(TypedDict):
+    """Record one completed ReAct iteration: what was asked, found, and cited."""
+
+    thought: str
+    action: Literal["vector_retrieve", "web_search"]
+    action_input: str
+    fact: str
+    sources: list[SourceState]
+
+
 class AgentState(TypedDict):
-    """Represent the minimum state required by the initial routed graph."""
+    """Represent the state shared by every ReAct + Self-RAG graph node."""
 
     question: str
     retrieval_action: NotRequired[Literal["retrieve", "abstain"]]
@@ -38,19 +57,22 @@ class AgentState(TypedDict):
     conversation_history: NotRequired[list[ConversationMessage]]
     conversation_context: NotRequired[list[ConversationMessage]]
     original_query: NotRequired[str]
-    rewritten_query: NotRequired[str]
-    rewrite_used_conversation_context: NotRequired[bool]
-    rewrite_reason: NotRequired[str]
-    retrieved_chunks: NotRequired[list[dict[str, Any]]]
-    retrieval_attempts: NotRequired[int]
-    relevant_chunks: NotRequired[list[dict[str, Any]]]
-    relevant_chunk_ids: NotRequired[list[str]]
-    relevance_decisions: NotRequired[list[dict[str, str]]]
+    iteration_count: NotRequired[int]
+    max_iterations: NotRequired[int]
+    scratchpad: NotRequired[list[ScratchpadEntry]]
+    action: NotRequired[Literal["vector_retrieve", "web_search", "finish"]]
+    action_input: NotRequired[str]
+    action_thought: NotRequired[str]
+    tool_attempts: NotRequired[int]
+    current_action: NotRequired[Literal["vector_retrieve", "web_search"]]
+    current_evidence: NotRequired[list[Evidence]]
     relevance_status: NotRequired[Literal["relevant", "none"]]
     relevance_reason: NotRequired[str]
+    relevant_evidence: NotRequired[list[Evidence]]
+    current_fact: NotRequired[str]
+    current_sources: NotRequired[list[SourceState]]
     support_status: NotRequired[
-        Literal["pending", "supported", "partially_supported", "unsupported"]
+        Literal["supported", "partially_supported", "unsupported"]
     ]
-    support_claims: NotRequired[list[dict[str, Any]]]
     support_reason: NotRequired[str]
     response: NotRequired[ResponseState]
