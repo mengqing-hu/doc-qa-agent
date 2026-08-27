@@ -30,8 +30,17 @@ class WebSearchTool:
             tavily_api_key=get_required_environment_variable("TAVILY_API_KEY"),
         )
 
-    def run(self, query: str) -> list[Evidence]:
-        """Return web search results adapted into the shared Evidence shape."""
+    def run(
+        self,
+        query: str,
+        *,
+        metadata_filter: Mapping[str, str] | None = None,
+    ) -> list[Evidence]:
+        """Return web search results adapted into the shared Evidence shape.
+
+        `metadata_filter` is accepted for interface conformance with `Tool`
+        but has no meaning for live web results, and is ignored.
+        """
         normalized_query = query.strip()
         if not normalized_query:
             raise ValueError("query must not be empty")
@@ -50,7 +59,12 @@ class WebSearchTool:
 
 
 def web_result_to_evidence(result: Mapping[str, Any]) -> Evidence:
-    """Adapt one Tavily search result into the shared Evidence shape."""
+    """Adapt one Tavily search result into the shared Evidence shape.
+
+    `score` is always None: Tavily results are not scored on the same scale
+    as the reranker, so they never qualify for the high-confidence bypass
+    and are always sent through the normal relevance grading.
+    """
     url = str(result.get("url", ""))
     return {
         "chunk_id": f"web_{hashlib.sha1(url.encode('utf-8')).hexdigest()[:12]}",
@@ -61,4 +75,5 @@ def web_result_to_evidence(result: Mapping[str, Any]) -> Evidence:
             "page": None,
             "section_title": result.get("title"),
         },
+        "score": None,
     }

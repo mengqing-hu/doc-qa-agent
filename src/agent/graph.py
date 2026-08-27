@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -25,6 +26,13 @@ OTHER_ACTION: dict[str, str] = {
     "web_search": "vector_retrieve",
 }
 MAX_TOOL_ATTEMPTS_PER_ITERATION = 2
+METADATA_FILTER_MAX_CONTEXT_CHARACTERS = 50_000
+METADATA_FILTER_MAX_TOKENS = 2048
+# Starting point for the scadsai reranker's [0, 1]-scale relevance_score.
+# Tune against real observed scores (e.g. from LangSmith traces) before
+# relying on this in production — it has not been empirically calibrated.
+RELEVANCE_SCORE_THRESHOLD = 0.7
+CLAIM_NUMBER_PATTERN = re.compile(r"\b\d+(?:\.\d+)?%?\b")
 
 
 def build_agent_graph(
@@ -49,6 +57,7 @@ def build_agent_graph(
     builder.add_node(
         "run_action", _run_action_node(vector_retrieve_tool, web_search_tool)
     )
+    builder.add_node("accept_evidence", _accept_evidence_node)
     builder.add_node("grade_relevance", _grade_relevance_node(relevance_grader))
     builder.add_node("generate_answer", _generate_answer_node(pipeline))
     builder.add_node("verify_answer", _verify_answer_node(support_verifier))
@@ -70,7 +79,12 @@ def build_agent_graph(
         _select_after_action,
         {"finish": "finish_answer", "retrieve": "run_action"},
     )
-    builder.add_edge("run_action", "grade_relevance")
+    builder.add_conditional_edges(
+        "run_action",
+        _select_after_run_action,
+        {"generate": "accept_evidence", "grade": "grade_relevance"},
+    )
+    builder.add_edge("accept_evidence", "generate_answer")
     builder.add_conditional_edges(
         "grade_relevance",
         _select_after_relevance,
@@ -185,6 +199,7 @@ def _select_action_node(action_selector: LLMActionSelector):
             "action": decision.action,
             "action_input": decision.action_input,
             "action_thought": decision.thought,
+            "metadata_filter": decision.metadata_filter,
             "tool_attempts": 0,
         }
 
@@ -214,7 +229,10 @@ def _run_action_node(vector_retrieve_tool: Tool, web_search_tool: Tool):
             state["action"] if attempts == 0 else OTHER_ACTION[state["action"]]
         )
         try:
-            evidence = tools[chosen_action].run(state["action_input"])
+            evidence = tools[chosen_action].run(
+                state["action_input"],
+                metadata_filter=state.get("metadata_filter"),
+            )
         except Exception:
             evidence = []
         return {
@@ -224,6 +242,57 @@ def _run_action_node(vector_retrieve_tool: Tool, web_search_tool: Tool):
         }
 
     return run_action
+
+
+def _select_after_run_action(state: AgentState) -> str:
+    """Skip LLM relevance grading when it would be redundant or unreliable.
+
+    Two cases bypass `grade_relevance` and go straight to generation:
+
+    - A metadata_filter match is already a structural, exact match (e.g.
+      every table chunk, or every chunk from one source document) — asking
+      an LLM to re-judge its relevance is both redundant and, for a large
+      match set, prone to failure (the relevance grader must enumerate
+      every chunk in one JSON response).
+    - Every piece of evidence already scored above
+      RELEVANCE_SCORE_THRESHOLD from the reranker — a high cross-encoder
+      score is itself a relevance judgment, just a numeric one instead of
+      an LLM-reasoned one, so re-judging it with an LLM call adds cost and
+      latency without adding information.
+
+    Both only apply when `vector_retrieve` is the tool that actually ran:
+    `web_search` never honors metadata_filter and never carries a
+    comparable score, so its results always go through real grading.
+    """
+    evidence = state.get("current_evidence", [])
+    if not evidence or state.get("current_action") != "vector_retrieve":
+        return "grade"
+    if state.get("metadata_filter"):
+        return "generate"
+    if all(
+        item.get("score") is not None and item["score"] >= RELEVANCE_SCORE_THRESHOLD
+        for item in evidence
+    ):
+        return "generate"
+    return "grade"
+
+
+def _accept_evidence_node(state: AgentState) -> dict[str, Any]:
+    """Treat this iteration's evidence as relevant without an LLM relevance pass."""
+    evidence = state.get("current_evidence", [])
+    if state.get("metadata_filter"):
+        reason = "Matched by metadata_filter; relevance grading skipped."
+    else:
+        reason = (
+            f"Every candidate scored at or above the "
+            f"{RELEVANCE_SCORE_THRESHOLD} reranker threshold; relevance "
+            "grading skipped."
+        )
+    return {
+        "relevant_evidence": evidence,
+        "relevance_status": "relevant",
+        "relevance_reason": reason,
+    }
 
 
 def _grade_relevance_node(relevance_grader: LLMRelevanceGrader):
@@ -258,8 +327,19 @@ def _generate_answer_node(pipeline: RAGPipeline):
     """Create the node that extracts one fact from this iteration's evidence."""
 
     def run_generate_answer(state: AgentState) -> dict[str, Any]:
+        # A metadata_filter request wants every matching chunk covered, and
+        # room to write about all of them, not the tighter budget sized for
+        # a single-fact top-k similarity search.
+        has_metadata_filter = bool(state.get("metadata_filter"))
+        max_context_characters = (
+            METADATA_FILTER_MAX_CONTEXT_CHARACTERS if has_metadata_filter else None
+        )
+        max_tokens = METADATA_FILTER_MAX_TOKENS if has_metadata_filter else None
         response = pipeline.generate(
-            state["action_input"], state.get("relevant_evidence", [])
+            state["action_input"],
+            state.get("relevant_evidence", []),
+            max_context_characters=max_context_characters,
+            max_tokens=max_tokens,
         )
         return {
             "current_fact": response.answer,
@@ -277,14 +357,48 @@ def _generate_answer_node(pipeline: RAGPipeline):
     return run_generate_answer
 
 
+def _claim_numbers_verbatim_in_evidence(claim: str, evidence_text: str) -> bool:
+    """Return True only if every number in the claim is quoted verbatim in the evidence.
+
+    This targets the single most common and most dangerous hallucination
+    pattern — a fabricated or altered number — directly: copying a number
+    verbatim cannot introduce that distortion, so a claim built entirely of
+    numbers that already appear in the evidence needs no further LLM check.
+    A claim with no numbers at all is not decided by this check (it falls
+    through to the normal verification path).
+    """
+    claim_numbers = {
+        match for match in CLAIM_NUMBER_PATTERN.findall(claim) if len(match) >= 2
+    }
+    if not claim_numbers:
+        return False
+    return all(
+        re.search(rf"\b{re.escape(number)}\b", evidence_text) is not None
+        for number in claim_numbers
+    )
+
+
 def _verify_answer_node(support_verifier: LLMSupportVerifier):
     """Create the node that checks this iteration's fact against its evidence."""
 
     def run_verify_answer(state: AgentState) -> dict[str, Any]:
+        claim = state["current_fact"]
+        evidence = state.get("relevant_evidence", [])
+        evidence_text = "\n".join(item["text"] for item in evidence)
+
+        if _claim_numbers_verbatim_in_evidence(claim, evidence_text):
+            return {
+                "support_status": "supported",
+                "support_reason": (
+                    "Every number in the answer appears verbatim in the "
+                    "evidence; LLM verification skipped."
+                ),
+            }
+
         decision = support_verifier.verify(
             state["action_input"],
-            state["current_fact"],
-            state.get("relevant_evidence", []),
+            claim,
+            evidence,
         )
         return {
             "support_status": decision.status,

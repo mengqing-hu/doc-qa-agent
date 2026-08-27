@@ -35,6 +35,7 @@ class Evidence(TypedDict):
     text: str
     origin: Literal["rag", "web"]
     metadata: dict[str, Any]
+    score: float | None
 
 
 class ScratchpadEntry(TypedDict):
@@ -63,6 +64,7 @@ class AgentState(TypedDict):
     action: NotRequired[Literal["vector_retrieve", "web_search", "finish"]]
     action_input: NotRequired[str]
     action_thought: NotRequired[str]
+    metadata_filter: NotRequired[dict[str, str] | None]
     tool_attempts: NotRequired[int]
     current_action: NotRequired[Literal["vector_retrieve", "web_search"]]
     current_evidence: NotRequired[list[Evidence]]

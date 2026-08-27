@@ -31,7 +31,10 @@ def main() -> None:
         retrieval_gate=LLMRetrievalGate(pipeline.llm),
         context_manager=ContextManager(config),
         chitchat_responder=LLMChitchatResponder(pipeline.llm),
-        action_selector=LLMActionSelector(pipeline.llm),
+        action_selector=LLMActionSelector(
+            pipeline.llm,
+            document_names=pipeline.hybrid_retriever.vector_store.get_indexed_sources(),
+        ),
         relevance_grader=LLMRelevanceGrader(pipeline.llm),
         support_verifier=LLMSupportVerifier(pipeline.llm),
         vector_retrieve_tool=VectorRetrieveTool(pipeline),

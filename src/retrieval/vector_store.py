@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_COLLECTION_NAME = "doc_chunks"
 DEFAULT_PERSIST_DIRECTORY = "data/chroma_db"
 DEFAULT_TOP_K = 5
+DEFAULT_METADATA_FILTER_LIMIT = 200
 
 
 class VectorStore:
@@ -99,6 +100,47 @@ class VectorStore:
         )
         return _format_query_results(query_result)
 
+    def get_by_metadata(
+        self,
+        where: Mapping[str, Any],
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return every chunk whose metadata exactly matches `where`.
+
+        Unlike `search`, this performs no similarity ranking: it returns all
+        matching chunks (up to `limit`), which is what a structural request
+        (e.g. every chunk of one type, or every chunk from one document)
+        needs instead of the top-k most similar chunks to a query.
+        """
+        if not where:
+            raise ValueError("where must not be empty")
+        result_limit = limit if limit is not None else DEFAULT_METADATA_FILTER_LIMIT
+        if result_limit <= 0:
+            raise ValueError("limit must be greater than zero")
+
+        result = self.collection.get(
+            where=_chroma_where(where),
+            limit=result_limit,
+            include=["documents", "metadatas"],
+        )
+        return _format_collection_records(result)
+
+    def get_indexed_sources(self) -> list[str]:
+        """Return the distinct source documents actually present in the index.
+
+        This reads the live collection rather than any build-time config, so
+        it always reflects what is really indexed even if the index was
+        built or modified through a different path than the current config.
+        """
+        chunks = self.load_chunks()
+        sources = {
+            str(chunk.get("metadata", {}).get("source"))
+            for chunk in chunks
+            if chunk.get("metadata", {}).get("source")
+        }
+        return sorted(sources)
+
     def load_chunks(self) -> list[dict[str, Any]]:
         """Load all indexed chunks so BM25 can be rebuilt without re-ingestion."""
         result = self.collection.get(include=["documents", "metadatas"])
@@ -109,6 +151,18 @@ class VectorStore:
             self.collection.name,
         )
         return chunks
+
+
+def _chroma_where(where: Mapping[str, Any]) -> dict[str, Any]:
+    """Translate a flat equality filter into Chroma's single-operator syntax.
+
+    Chroma's `where` clause accepts exactly one top-level key; combining
+    multiple equality conditions requires wrapping them in `$and`.
+    """
+    conditions = [{key: value} for key, value in where.items()]
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
 
 
 def _chroma_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
