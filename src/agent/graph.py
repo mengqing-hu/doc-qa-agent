@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -21,6 +22,7 @@ from src.generation.rag_pipeline import RAGPipeline
 from src.generation.response import RAGResponse, SourceReference
 
 
+logger = logging.getLogger(__name__)
 OTHER_ACTION: dict[str, str] = {
     "vector_retrieve": "web_search",
     "web_search": "vector_retrieve",
@@ -77,7 +79,7 @@ def build_agent_graph(
     builder.add_conditional_edges(
         "select_action",
         _select_after_action,
-        {"finish": "finish_answer", "retrieve": "run_action"},
+        {"finish": "finish_answer", "retrieve": "run_action", "abstain": "abstain"},
     )
     builder.add_conditional_edges(
         "run_action",
@@ -90,7 +92,11 @@ def build_agent_graph(
         _select_after_relevance,
         {"generate": "generate_answer", "retry": "run_action", "abstain": "abstain"},
     )
-    builder.add_edge("generate_answer", "verify_answer")
+    builder.add_conditional_edges(
+        "generate_answer",
+        _select_after_generate,
+        {"verify": "verify_answer", "abstain": "abstain"},
+    )
     builder.add_conditional_edges(
         "verify_answer",
         _select_after_support,
@@ -138,11 +144,20 @@ def invoke_agent_graph(
 def _retrieval_gate_node(retrieval_gate: LLMRetrievalGate):
     """Create the node that records the selected retrieval action."""
 
-    def run_retrieval_gate(state: AgentState) -> dict[str, str | float]:
-        decision = retrieval_gate.decide(
-            state["original_query"],
-            _user_messages(state.get("conversation_context", [])),
-        )
+    def run_retrieval_gate(state: AgentState) -> dict[str, Any]:
+        try:
+            decision = retrieval_gate.decide(
+                state["original_query"],
+                _user_messages(state.get("conversation_context", [])),
+            )
+        except Exception:
+            logger.exception("retrieval_gate failed; abstaining")
+            return {
+                "retrieval_action": "abstain",
+                "retrieval_confidence": 0.0,
+                "retrieval_reason": "retrieval_gate failed",
+                "error": "retrieval_gate failed",
+            }
         return {
             "retrieval_action": decision.action,
             "retrieval_confidence": decision.confidence,
@@ -171,9 +186,13 @@ def _chitchat_node(chitchat_responder: LLMChitchatResponder):
     """Create the node that answers requests that need no document evidence."""
 
     def run_chitchat(state: AgentState) -> dict[str, ResponseState]:
-        reply = chitchat_responder.respond(
-            state["original_query"], state.get("conversation_context", [])
-        )
+        try:
+            reply = chitchat_responder.respond(
+                state["original_query"], state.get("conversation_context", [])
+            )
+        except Exception:
+            logger.exception("chitchat failed; returning fallback reply")
+            reply = "Sorry, I ran into a problem answering that — please try again."
         return {"response": {"answer": reply, "sources": []}}
 
     return run_chitchat
@@ -192,9 +211,13 @@ def _select_action_node(action_selector: LLMActionSelector):
     """Create the node that picks the next Thought+Action pair."""
 
     def run_select_action(state: AgentState) -> dict[str, Any]:
-        decision = action_selector.select(
-            state["original_query"], state.get("scratchpad", [])
-        )
+        try:
+            decision = action_selector.select(
+                state["original_query"], state.get("scratchpad", [])
+            )
+        except Exception:
+            logger.exception("select_action failed; abstaining")
+            return {"action": "error", "error": "select_action failed"}
         return {
             "action": decision.action,
             "action_input": decision.action_input,
@@ -207,12 +230,14 @@ def _select_action_node(action_selector: LLMActionSelector):
 
 
 def _select_after_action(state: AgentState) -> str:
-    """Route to finishing the trajectory or running the chosen retrieval tool."""
+    """Route to finishing the trajectory, running the chosen tool, or abstaining."""
     action = state.get("action")
     if action == "finish":
         return "finish"
     if action in OTHER_ACTION:
         return "retrieve"
+    if action == "error":
+        return "abstain"
     raise RuntimeError("Action selector did not return a supported action")
 
 
@@ -239,6 +264,11 @@ def _run_action_node(vector_retrieve_tool: Tool, web_search_tool: Tool):
             "current_action": chosen_action,
             "current_evidence": evidence,
             "tool_attempts": attempts + 1,
+            # Clear any error left by a prior failed grade_relevance/verify_answer
+            # attempt now that a fresh retrieval attempt is starting — otherwise
+            # a later successful attempt would still show the internal-error
+            # abstain message instead of its real outcome.
+            "error": None,
         }
 
     return run_action
@@ -300,7 +330,16 @@ def _grade_relevance_node(relevance_grader: LLMRelevanceGrader):
 
     def run_grade_relevance(state: AgentState) -> dict[str, Any]:
         evidence = state.get("current_evidence", [])
-        decision = relevance_grader.grade(state["action_input"], evidence)
+        try:
+            decision = relevance_grader.grade(state["action_input"], evidence)
+        except Exception:
+            logger.exception("grade_relevance failed")
+            return {
+                "relevant_evidence": [],
+                "relevance_status": "error",
+                "relevance_reason": "grade_relevance failed",
+                "error": "grade_relevance failed",
+            }
         relevant_ids = set(decision.relevant_chunk_ids)
         relevant_evidence = [
             item for item in evidence if item["chunk_id"] in relevant_ids
@@ -335,12 +374,17 @@ def _generate_answer_node(pipeline: RAGPipeline):
             METADATA_FILTER_MAX_CONTEXT_CHARACTERS if has_metadata_filter else None
         )
         max_tokens = METADATA_FILTER_MAX_TOKENS if has_metadata_filter else None
-        response = pipeline.generate(
-            state["action_input"],
-            state.get("relevant_evidence", []),
-            max_context_characters=max_context_characters,
-            max_tokens=max_tokens,
-        )
+        try:
+            response = pipeline.generate(
+                state["action_input"],
+                state.get("relevant_evidence", []),
+                max_context_characters=max_context_characters,
+                max_tokens=max_tokens,
+                group_fairly_by_source=has_metadata_filter,
+            )
+        except Exception:
+            logger.exception("generate_answer failed")
+            return {"current_fact": None, "error": "generate_answer failed"}
         return {
             "current_fact": response.answer,
             "current_sources": [
@@ -355,6 +399,13 @@ def _generate_answer_node(pipeline: RAGPipeline):
         }
 
     return run_generate_answer
+
+
+def _select_after_generate(state: AgentState) -> str:
+    """Route to support verification, or straight to abstention on failure."""
+    if state.get("current_fact") is None:
+        return "abstain"
+    return "verify"
 
 
 def _claim_numbers_verbatim_in_evidence(claim: str, evidence_text: str) -> bool:
@@ -395,11 +446,19 @@ def _verify_answer_node(support_verifier: LLMSupportVerifier):
                 ),
             }
 
-        decision = support_verifier.verify(
-            state["action_input"],
-            claim,
-            evidence,
-        )
+        try:
+            decision = support_verifier.verify(
+                state["action_input"],
+                claim,
+                evidence,
+            )
+        except Exception:
+            logger.exception("verify_answer failed")
+            return {
+                "support_status": "error",
+                "support_reason": "verify_answer failed",
+                "error": "verify_answer failed",
+            }
         return {
             "support_status": decision.status,
             "support_reason": decision.reason,
@@ -453,7 +512,12 @@ def _finish_answer_node(state: AgentState) -> dict[str, ResponseState]:
 
 def _abstain_node(state: AgentState) -> dict[str, ResponseState]:
     """Return a grounded refusal when the gate, tools, or budget close off an answer."""
-    if state.get("retrieval_action") == "abstain":
+    if state.get("error"):
+        answer = (
+            "Sorry, I ran into a problem while answering this question. "
+            "Please try again in a moment."
+        )
+    elif state.get("retrieval_action") == "abstain":
         answer = "I can only answer questions about the indexed documents."
     elif int(state.get("iteration_count", 0)) >= int(state.get("max_iterations", 0)):
         answer = "This question could not be answered within the allowed number of reasoning steps."

@@ -31,6 +31,7 @@ llm:
   model: "meta-llama/Llama-3.3-70B-Instruct"
   temperature: 0.0
   max_tokens: 512
+  max_retries: 2
 
 generation:
   prompt_path: "prompts/qa_prompt.md"

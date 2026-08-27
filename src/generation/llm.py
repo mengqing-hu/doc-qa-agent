@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from openai import OpenAI, OpenAIError
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "meta-llama/Llama-3.3-70B-Instruct"
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_MAX_TOKENS = 512
+DEFAULT_MAX_RETRIES = 2
 
 
 class LLM:
@@ -38,6 +40,11 @@ class LLM:
             raise ValueError("llm.max_tokens must be greater than zero")
         if not 0 <= self.temperature <= 2:
             raise ValueError("llm.temperature must be between zero and two")
+        self.max_retries = int(
+            self.config.get("llm", "max_retries", default=DEFAULT_MAX_RETRIES)
+        )
+        if self.max_retries < 0:
+            raise ValueError("llm.max_retries must be greater than or equal to zero")
 
         self.client = client if client is not None else OpenAI(
             api_key=self.config.scadsai_api_key,
@@ -52,16 +59,7 @@ class LLM:
         if token_limit <= 0:
             raise ValueError("max_tokens must be greater than zero")
 
-        try:
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.temperature,
-                max_tokens=token_limit,
-            )
-        except OpenAIError as error:
-            logger.exception("LLM request failed for model %s", self.model)
-            raise RuntimeError("LLM request failed") from error
+        completion = self._create_completion_with_retry(prompt, token_limit)
 
         content = completion.choices[0].message.content if completion.choices else None
         if content is None or not content.strip():
@@ -79,3 +77,40 @@ class LLM:
         answer = content.strip()
         logger.info("Generated answer with %d character(s)", len(answer))
         return answer
+
+    def _create_completion_with_retry(self, prompt: str, token_limit: int) -> Any:
+        """Retry a transient LLM request failure with exponential backoff.
+
+        `OpenAIError` covers timeouts, rate limits, and connection errors —
+        the same class of transient failure the ScaDS.AI reranker already
+        retries. A non-transient failure (e.g. a malformed response) is not
+        an `OpenAIError` and is not retried here.
+        """
+        for retry_count in range(self.max_retries + 1):
+            try:
+                return self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=self.temperature,
+                    max_tokens=token_limit,
+                )
+            except OpenAIError as error:
+                if retry_count == self.max_retries:
+                    logger.exception(
+                        "LLM request failed for model %s after %d retry(ies)",
+                        self.model,
+                        retry_count,
+                    )
+                    raise RuntimeError("LLM request failed") from error
+                delay_seconds = float(2**retry_count)
+                logger.warning(
+                    "LLM request failed for model %s; retrying in %.1f second(s) "
+                    "(%d/%d): %s",
+                    self.model,
+                    delay_seconds,
+                    retry_count + 1,
+                    self.max_retries,
+                    error,
+                )
+                time.sleep(delay_seconds)
+        raise AssertionError("unreachable")
