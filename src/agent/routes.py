@@ -19,15 +19,21 @@ RETRIEVAL_GATE_PROMPT = """You are the retrieval gate for a document question-an
 
 Choose exactly one action:
 - retrieve: a factual or explanatory request that may plausibly benefit from
-  retrieval over the indexed documents.
+  retrieval over the indexed documents. This includes any request scoped to
+  the indexed documents' own content or structure — for example a specific
+  fact, a summary or overview, every instance of some element they contain,
+  or anything else that can only be answered from what is in them. Producing
+  such an answer from retrieved evidence is retrieval, not the kind of
+  generation abstain refers to below.
 - chitchat: social pleasantries (greetings, thanks, small talk), a question
   about this conversation itself, or a general-knowledge question that does
   not require the indexed documents. These are answered directly, without
   retrieval and without document evidence.
 - abstain: a request the assistant should refuse outright, including
-  real-time external information, external actions, software creation, and
-  image generation. Also choose abstain when a pronoun or omitted entity
-  cannot be resolved from the current request and conversation history.
+  real-time external information, external actions, and creating a new
+  artifact unrelated to the indexed documents, such as source code or an
+  image. Also choose abstain when a pronoun or omitted entity cannot be
+  resolved from the current request and conversation history.
 
 Decide whether to attempt retrieval, not whether the documents will definitely
 contain the answer. Do not abstain merely because the documents may lack the
