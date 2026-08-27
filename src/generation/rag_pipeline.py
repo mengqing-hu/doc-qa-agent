@@ -46,11 +46,18 @@ class RAGPipeline:
         self,
         query: str,
         evidence_chunks: list[dict[str, Any]],
+        *,
+        max_context_characters: int | None = None,
+        max_tokens: int | None = None,
     ) -> RAGResponse:
         """Generate a grounded answer from already retrieved evidence chunks."""
         normalized_query = _normalized_query(query)
-        prompt = self.prompt_builder.build(normalized_query, evidence_chunks)
-        answer = self.llm.generate(prompt)
+        prompt = self.prompt_builder.build(
+            normalized_query,
+            evidence_chunks,
+            max_context_characters=max_context_characters,
+        )
+        answer = self.llm.generate(prompt, max_tokens=max_tokens)
         sources = tuple(_source_reference(chunk) for chunk in evidence_chunks)
         logger.info(
             "Answered question with %d retrieved source(s)",

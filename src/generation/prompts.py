@@ -41,13 +41,26 @@ class PromptBuilder:
         self.template = template if template is not None else self._load_template()
         _validate_template(self.template)
 
-    def build(self, query: str, chunks: Sequence[dict[str, Any]]) -> str:
+    def build(
+        self,
+        query: str,
+        chunks: Sequence[dict[str, Any]],
+        *,
+        max_context_characters: int | None = None,
+    ) -> str:
         """Return a prompt containing the highest-ranked chunks within its budget."""
         normalized_query = query.strip()
         if not normalized_query:
             raise ValueError("query must not be empty")
 
-        context = _build_context(chunks, self.max_context_characters)
+        budget = (
+            max_context_characters
+            if max_context_characters is not None
+            else self.max_context_characters
+        )
+        if budget <= 0:
+            raise ValueError("max_context_characters must be greater than zero")
+        context = _build_context(chunks, budget)
         return self.template.format(context=context, query=normalized_query)
 
     def _load_template(self) -> str:
