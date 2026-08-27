@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from src.core.config import Config
@@ -57,15 +58,13 @@ class HybridRetriever:
         if rrf_k < 0:
             raise ValueError("rrf_k must be greater than or equal to zero")
 
-        # Retrieve independently because dense and keyword matching are complementary.
-        dense_results = self.vector_store.search(
-            query,
-            top_k=int(self.config.get("retrieval", "dense_top_k", default=20)),
-        )
-        bm25_results = self.bm25_retriever.search(
-            query,
-            top_k=int(self.config.get("retrieval", "bm25_top_k", default=20)),
-        )
+        dense_top_k = int(self.config.get("retrieval", "dense_top_k", default=20))
+        bm25_top_k = int(self.config.get("retrieval", "bm25_top_k", default=20))
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="retrieval") as executor:
+            dense_future = executor.submit(self.vector_store.search, query, top_k=dense_top_k)
+            bm25_future = executor.submit(self.bm25_retriever.search, query, top_k=bm25_top_k)
+            dense_results = dense_future.result()
+            bm25_results = bm25_future.result()
 
         fused_results: dict[str, dict[str, Any]] = {}
         _add_ranked_results(
