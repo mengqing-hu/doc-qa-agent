@@ -8,6 +8,7 @@ from typing import Any
 from src.core.config import PROJECT_ROOT, Config
 from src.document.chunker import prepare_chunks
 from src.document.pdf_parser import parse_pdf_document
+from src.document.summarizer import generate_document_summaries
 from src.document.word_parser import parse_word_document
 from src.retrieval.embedder import Embedder
 from src.retrieval.vector_store import VectorStore
@@ -16,9 +17,11 @@ from src.retrieval.vector_store import VectorStore
 def build_document_index(config: Config) -> int:
     """Parse configured documents and replace their Chroma collection."""
     _, chunks = prepare_chunks(parse_configured_documents(config), config)
+    summary_chunks = generate_document_summaries(chunks, config)
+    all_chunks = chunks + summary_chunks
     vector_store = VectorStore(config, embedder=Embedder(config))
-    vector_store.replace_chunks(chunks)
-    return len(chunks)
+    vector_store.replace_chunks(all_chunks)
+    return len(all_chunks)
 
 
 def parse_configured_documents(config: Config) -> list[dict[str, Any]]:
