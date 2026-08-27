@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -47,8 +48,17 @@ class PromptBuilder:
         chunks: Sequence[dict[str, Any]],
         *,
         max_context_characters: int | None = None,
+        group_fairly_by_source: bool = False,
     ) -> str:
-        """Return a prompt containing the highest-ranked chunks within its budget."""
+        """Return a prompt containing the highest-ranked chunks within its budget.
+
+        `group_fairly_by_source` interleaves chunks by their `metadata.source`
+        before applying the budget, so one large document cannot exhaust the
+        budget before a smaller one gets any chunks in at all. Use it only
+        when the chunk order carries no relevance ranking to preserve (e.g.
+        a metadata-filtered structural match); leave it off for the default
+        similarity-ranked path, where the existing order is the priority.
+        """
         normalized_query = query.strip()
         if not normalized_query:
             raise ValueError("query must not be empty")
@@ -60,7 +70,10 @@ class PromptBuilder:
         )
         if budget <= 0:
             raise ValueError("max_context_characters must be greater than zero")
-        context = _build_context(chunks, budget)
+        ordered_chunks = (
+            _interleave_by_source(chunks) if group_fairly_by_source else chunks
+        )
+        context = _build_context(ordered_chunks, budget)
         return self.template.format(context=context, query=normalized_query)
 
     def _load_template(self) -> str:
@@ -93,6 +106,27 @@ def _validate_template(template: str) -> None:
             "Prompt template is missing required variable(s): "
             + ", ".join(missing_variables)
         )
+
+
+def _interleave_by_source(
+    chunks: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Round-robin chunks across their source documents.
+
+    Preserves each source's internal ordering, but takes one chunk per
+    source in turn — so the budget-truncation loop that follows sees every
+    source early, instead of exhausting the budget on whichever source
+    happens to come first in the input order.
+    """
+    chunks_by_source: dict[str, list[dict[str, Any]]] = {}
+    for chunk in chunks:
+        source = str((chunk.get("metadata") or {}).get("source", "unknown source"))
+        chunks_by_source.setdefault(source, []).append(chunk)
+
+    interleaved: list[dict[str, Any]] = []
+    for group in itertools.zip_longest(*chunks_by_source.values()):
+        interleaved.extend(chunk for chunk in group if chunk is not None)
+    return interleaved
 
 
 def _build_context(

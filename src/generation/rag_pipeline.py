@@ -49,6 +49,7 @@ class RAGPipeline:
         *,
         max_context_characters: int | None = None,
         max_tokens: int | None = None,
+        group_fairly_by_source: bool = False,
     ) -> RAGResponse:
         """Generate a grounded answer from already retrieved evidence chunks."""
         normalized_query = _normalized_query(query)
@@ -56,6 +57,7 @@ class RAGPipeline:
             normalized_query,
             evidence_chunks,
             max_context_characters=max_context_characters,
+            group_fairly_by_source=group_fairly_by_source,
         )
         answer = self.llm.generate(prompt, max_tokens=max_tokens)
         sources = tuple(_source_reference(chunk) for chunk in evidence_chunks)
