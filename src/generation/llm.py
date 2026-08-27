@@ -67,6 +67,15 @@ class LLM:
         if content is None or not content.strip():
             raise RuntimeError("LLM response did not contain answer text")
 
+        finish_reason = completion.choices[0].finish_reason if completion.choices else None
+        if finish_reason == "length":
+            logger.warning(
+                "LLM response for model %s was truncated by max_tokens=%d; "
+                "the answer may be incomplete",
+                self.model,
+                token_limit,
+            )
+
         answer = content.strip()
         logger.info("Generated answer with %d character(s)", len(answer))
         return answer
