@@ -20,7 +20,7 @@ class VectorRetrieveTool:
         self,
         query: str,
         *,
-        metadata_filter: Mapping[str, str] | None = None,
+        metadata_filter: Mapping[str, str | tuple[str, ...]] | None = None,
     ) -> list[Evidence]:
         """Return chunks adapted into the shared Evidence shape.
 

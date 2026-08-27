@@ -46,22 +46,26 @@ the query makes sense on its own, without needing this conversation's context.
 For vector_retrieve only, you may also set metadata_filter when the request
 is scoped to a structural property of the indexed documents rather than to
 semantic similarity — for example, every chunk of one particular kind, or
-every chunk from one particular source document. metadata_filter is a JSON
-object mapping one or both of these exact keys to the value to match:
-- source: the exact source document filename.
+every chunk from one or more particular source documents. metadata_filter is
+a JSON object mapping one or both of these exact keys to the value to match:
+- source: the exact source document filename, or a JSON array of filenames
+  to match any one of them (for example, when a request spans more than one
+  document).
 - chunk_type: the exact kind of chunk (for example "table", "text", or
-  "document_summary").
-When present, every matching chunk is returned instead of only the chunks
-most similar to action_input. Omit metadata_filter (or set it to null) for
-an ordinary similarity-based request. Never invent a key other than these
-two.
+  "document_summary"), or a JSON array to match any one of them.
+Never combine multiple filenames or chunk kinds into one string — always use
+a JSON array for "any of these", never a single string like
+"[a.pdf, b.pdf]". When present, every matching chunk is returned instead of
+only the chunks most similar to action_input. Omit metadata_filter (or set
+it to null) for an ordinary similarity-based request. Never invent a key
+other than these two.
 
 Return only a JSON object with this exact schema:
 {{
   "thought": "Your reasoning about what is known and what is still needed.",
   "action": "vector_retrieve | web_search | finish",
   "action_input": "A self-contained retrieval query, or the final answer when action is finish.",
-  "metadata_filter": {{"source": "...", "chunk_type": "..."}} or null
+  "metadata_filter": {{"source": "..." or ["...", "..."], "chunk_type": "..." or ["...", "..."]}} or null
 }}
 
 Original question:
@@ -79,7 +83,7 @@ class ActionDecision:
     thought: str
     action: ActionName
     action_input: str
-    metadata_filter: Mapping[str, str] | None = None
+    metadata_filter: Mapping[str, str | tuple[str, ...]] | None = None
 
 
 class LLMActionSelector:
@@ -159,14 +163,18 @@ def _parse_action_decision(response: str) -> ActionDecision:
     )
 
 
-def _parse_metadata_filter(raw_metadata_filter: object) -> Mapping[str, str] | None:
+def _parse_metadata_filter(
+    raw_metadata_filter: object,
+) -> Mapping[str, str | tuple[str, ...]] | None:
     """Best-effort parse of the optional metadata_filter object.
 
     metadata_filter is an optional enhancement, not a required field: an
     unsupported key or an unusable value degrades to omitting that key
     rather than failing the whole action decision, so a malformed field
     never crashes a turn that would otherwise have a valid action and
-    action_input.
+    action_input. Each value may be a single string, or a JSON array of
+    strings meaning "match any of these" (e.g. one filter spanning several
+    source documents).
     """
     if raw_metadata_filter is None:
         return None
@@ -176,7 +184,7 @@ def _parse_metadata_filter(raw_metadata_filter: object) -> Mapping[str, str] | N
         )
         return None
 
-    metadata_filter: dict[str, str] = {}
+    metadata_filter: dict[str, str | tuple[str, ...]] = {}
     for key, value in raw_metadata_filter.items():
         if key not in ALLOWED_METADATA_FILTER_KEYS:
             logger.warning(
@@ -185,12 +193,46 @@ def _parse_metadata_filter(raw_metadata_filter: object) -> Mapping[str, str] | N
                 key,
             )
             continue
-        if not isinstance(value, str) or not value.strip():
+        parsed_value = _parse_metadata_filter_value(key, value)
+        if parsed_value is None:
+            continue
+        metadata_filter[key] = parsed_value
+    return metadata_filter or None
+
+
+def _parse_metadata_filter_value(
+    key: str, value: object
+) -> str | tuple[str, ...] | None:
+    """Parse one metadata_filter value as a single string or list of strings."""
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
             logger.warning(
                 "Action selector returned an invalid metadata_filter value for %r; "
                 "dropping it",
                 key,
             )
-            continue
-        metadata_filter[key] = value.strip()
-    return metadata_filter or None
+            return None
+        return normalized
+
+    if isinstance(value, list):
+        values = tuple(
+            item.strip()
+            for item in value
+            if isinstance(item, str) and item.strip()
+        )
+        if not values:
+            logger.warning(
+                "Action selector returned an invalid metadata_filter list for %r; "
+                "dropping it",
+                key,
+            )
+            return None
+        return values
+
+    logger.warning(
+        "Action selector returned an invalid metadata_filter value for %r; "
+        "dropping it",
+        key,
+    )
+    return None

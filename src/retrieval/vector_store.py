@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 from collections.abc import Mapping
 from pathlib import Path
@@ -109,9 +110,18 @@ class VectorStore:
         """Return every chunk whose metadata exactly matches `where`.
 
         Unlike `search`, this performs no similarity ranking: it returns all
-        matching chunks (up to `limit`), which is what a structural request
-        (e.g. every chunk of one type, or every chunk from one document)
-        needs instead of the top-k most similar chunks to a query.
+        matching chunks (up to `limit` per distinct value combination), which
+        is what a structural request (e.g. every chunk of one type, or every
+        chunk from one or more documents) needs instead of the top-k most
+        similar chunks to a query.
+
+        When a value is a list (match any of these), `limit` applies
+        separately to each value rather than to the combined query — a
+        single shared limit would let one value's matches crowd out
+        another's (e.g. a longer document silently squeezing a shorter one
+        out of a multi-document filter). Multiple list-valued keys are
+        combined as every value combination between them, each queried and
+        capped independently.
         """
         if not where:
             raise ValueError("where must not be empty")
@@ -119,12 +129,29 @@ class VectorStore:
         if result_limit <= 0:
             raise ValueError("limit must be greater than zero")
 
-        result = self.collection.get(
-            where=_chroma_where(where),
-            limit=result_limit,
-            include=["documents", "metadatas"],
-        )
-        return _format_collection_records(result)
+        keys = list(where.keys())
+        value_options = [
+            list(value) if isinstance(value, (list, tuple)) else [value]
+            for value in where.values()
+        ]
+        combinations = [
+            dict(zip(keys, combination, strict=True))
+            for combination in itertools.product(*value_options)
+        ]
+
+        seen_chunk_ids: set[str] = set()
+        chunks: list[dict[str, Any]] = []
+        for combination in combinations:
+            result = self.collection.get(
+                where=_chroma_where(combination),
+                limit=result_limit,
+                include=["documents", "metadatas"],
+            )
+            for chunk in _format_collection_records(result):
+                if chunk["chunk_id"] not in seen_chunk_ids:
+                    seen_chunk_ids.add(chunk["chunk_id"])
+                    chunks.append(chunk)
+        return chunks
 
     def get_indexed_sources(self) -> list[str]:
         """Return the distinct source documents actually present in the index.
@@ -154,12 +181,17 @@ class VectorStore:
 
 
 def _chroma_where(where: Mapping[str, Any]) -> dict[str, Any]:
-    """Translate a flat equality filter into Chroma's single-operator syntax.
+    """Translate a flat equality/membership filter into Chroma's syntax.
 
     Chroma's `where` clause accepts exactly one top-level key; combining
-    multiple equality conditions requires wrapping them in `$and`.
+    multiple conditions requires wrapping them in `$and`. A list or tuple
+    value means "match any of these" and is translated to `$in`; any other
+    value is matched by plain equality.
     """
-    conditions = [{key: value} for key, value in where.items()]
+    conditions = [
+        {key: {"$in": list(value)} if isinstance(value, (list, tuple)) else value}
+        for key, value in where.items()
+    ]
     if len(conditions) == 1:
         return conditions[0]
     return {"$and": conditions}
