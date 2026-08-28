@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -68,6 +69,10 @@ class Reranker:
         self.min_request_interval_seconds: float | None = None
         self.max_retries: int | None = None
         self._last_request_monotonic: float | None = None
+        # Serialises the rate-limited endpoint call across threads. Without it,
+        # concurrent callers all read the same _last_request_monotonic, all
+        # decide they may proceed, and burst the endpoint into 429s.
+        self._request_lock = threading.Lock()
 
         if self.provider == "local":
             hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
@@ -209,30 +214,33 @@ class Reranker:
         ):
             raise RuntimeError("ScaDS.AI reranker client is not configured")
 
-        for retry_count in range(self.max_retries + 1):
-            self._wait_for_request_slot()
-            response = self.session.post(
-                self.endpoint,
-                json=dict(payload),
-                headers={"Authorization": f"Bearer {self.config.scadsai_api_key}"},
-                timeout=self.timeout_seconds,
-            )
-            self._last_request_monotonic = time.monotonic()
-            if response.status_code != requests.codes.too_many_requests:
-                response.raise_for_status()
-                return response
+        # Hold the lock for the whole retry loop so concurrent callers queue
+        # behind one another rather than racing the rate limiter.
+        with self._request_lock:
+            for retry_count in range(self.max_retries + 1):
+                self._wait_for_request_slot()
+                response = self.session.post(
+                    self.endpoint,
+                    json=dict(payload),
+                    headers={"Authorization": f"Bearer {self.config.scadsai_api_key}"},
+                    timeout=self.timeout_seconds,
+                )
+                self._last_request_monotonic = time.monotonic()
+                if response.status_code != requests.codes.too_many_requests:
+                    response.raise_for_status()
+                    return response
 
-            if retry_count == self.max_retries:
-                response.raise_for_status()
-            delay_seconds = _retry_delay_seconds(response, retry_count)
-            logger.warning(
-                "ScaDS.AI rate limited reranking request; retrying in %.1f second(s) "
-                "(%d/%d)",
-                delay_seconds,
-                retry_count + 1,
-                self.max_retries,
-            )
-            time.sleep(delay_seconds)
+                if retry_count == self.max_retries:
+                    response.raise_for_status()
+                delay_seconds = _retry_delay_seconds(response, retry_count)
+                logger.warning(
+                    "ScaDS.AI rate limited reranking request; retrying in %.1f "
+                    "second(s) (%d/%d)",
+                    delay_seconds,
+                    retry_count + 1,
+                    self.max_retries,
+                )
+                time.sleep(delay_seconds)
 
         raise RuntimeError("ScaDS.AI reranking request exhausted retries")
 
