@@ -18,32 +18,37 @@ CODE_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 RETRIEVAL_GATE_PROMPT = """You are the retrieval gate for a document question-answering application.
 
 Choose exactly one action:
-- retrieve: a factual or explanatory request that may plausibly benefit from
-  retrieval over the indexed documents. This includes any request scoped to
-  the indexed documents' own content or structure — for example a specific
-  fact, a summary or overview, every instance of some element they contain,
-  or anything else that can only be answered from what is in them. Producing
-  such an answer from retrieved evidence is retrieval, not the kind of
-  generation abstain refers to below.
+- retrieve: a factual or explanatory request where at least one part could
+  plausibly be answered from the indexed documents' own content or structure —
+  a specific fact, a summary or overview, every instance of some element they
+  contain, or anything else grounded in what is in them. A later step decides
+  what to look up where, so choose retrieve even for a compound request whose
+  other parts clearly need outside information (for example: a value taken from
+  the documents, plus background about a method or a piece of hardware they
+  mention). Producing an answer from retrieved evidence is retrieval, not the
+  kind of generation abstain refers to below.
 - chitchat: social pleasantries (greetings, thanks, small talk), a question
-  about this conversation itself, or a general-knowledge question that does
-  not require the indexed documents. These are answered directly, without
-  retrieval and without document evidence.
-- abstain: a request the assistant should refuse outright, including
-  real-time external information, external actions, and creating a new
-  artifact unrelated to the indexed documents, such as source code or an
-  image. Also choose abstain when a pronoun or omitted entity cannot be
-  resolved from the current request and conversation history.
+  about this conversation itself, or a general-knowledge question with no
+  connection at all to the indexed documents. These are answered directly,
+  without retrieval and without document evidence.
+- abstain: a request the assistant should refuse outright — an external action,
+  or creating a new artifact unrelated to the indexed documents such as source
+  code or an image, or information that is genuinely live and changing (today's
+  weather, a current price). A stable fact about something the documents
+  mention (when a model was published, a GPU's release year or architecture) is
+  NOT live information — that is retrieve. Also choose abstain when a pronoun or
+  omitted entity cannot be resolved from the current request and conversation
+  history.
 
 Decide whether to attempt retrieval, not whether the documents will definitely
-contain the answer. Do not abstain merely because the documents may lack the
-answer. When an information request could plausibly benefit from retrieval,
-choose retrieve. Only choose chitchat when the request is clearly not about
-the indexed documents.
+contain the whole answer. Do not abstain merely because the documents may lack
+part of the answer. When any part of an information request could plausibly
+benefit from retrieval, choose retrieve. Only choose chitchat when the request
+is clearly not about the indexed documents at all.
 
-Classify the current request first. Use history only to resolve references or
-omitted entities. Do not let prior conversation change the scope of a
-standalone new topic.
+Classify the current request first. Use the summary and history only to resolve
+references or omitted entities. Do not let prior conversation change the scope
+of a standalone new topic.
 
 Return only a JSON object with this exact schema:
 {{
@@ -52,9 +57,12 @@ Return only a JSON object with this exact schema:
   "reason": "A concise explanation in English."
 }}
 
-The history contains only prior user requests. It is not document evidence.
+The summary and history describe prior turns only. They are not document evidence.
 
-Conversation history:
+Earlier conversation summary:
+{summary}
+
+Recent conversation history:
 {history}
 
 User request:
@@ -82,12 +90,14 @@ class LLMRetrievalGate:
         self,
         question: str,
         conversation_context: Sequence[ConversationMessage] = (),
+        summary: str | None = None,
     ) -> RetrievalDecision:
         """Return a retrieval action using bounded history to resolve references."""
         normalized_question = question.strip()
         if not normalized_question:
             raise ValueError("question must not be empty")
         prompt = RETRIEVAL_GATE_PROMPT.format(
+            summary=(summary.strip() if summary and summary.strip() else "(none)"),
             history=json.dumps(list(conversation_context), ensure_ascii=False),
             question=json.dumps(normalized_question, ensure_ascii=False),
         )

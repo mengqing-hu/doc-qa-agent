@@ -30,7 +30,9 @@ llm:
   base_url: "https://llm.scads.ai/v1"
   model: "meta-llama/Llama-3.3-70B-Instruct"
   temperature: 0.0
-  max_tokens: 512
+  # Default per-call output budget. The synthesis node overrides this with a
+  # larger budget; this value covers chitchat and the JSON-emitting nodes.
+  max_tokens: 1024
   max_retries: 2
 
 generation:
@@ -41,6 +43,20 @@ documents:
   paths:
     - "data/raw/HuMengqing.pdf"
     - "data/raw/Report.docx"
+
+agent:
+  # Hard cap on retrieval-planning rounds per turn. Round 1 decomposes the
+  # question into independent sub-queries (run together); round 2 adds only the
+  # dependent follow-ups. Round 3 rarely adds anything and mostly re-searches.
+  max_retrieval_rounds: 2
+  context:
+    # Token budget for the conversation window shown to the LLMs. The full
+    # transcript is stored separately (src/store/messages.py) and never trimmed.
+    max_context_tokens: 3000
+    # Fold older uncovered turns into the rolling summary once this many are
+    # eligible; keep the most recent turns verbatim.
+    resummarize_after: 12
+    keep_recent_verbatim: 6
 
 
 retrieval:
@@ -68,6 +84,14 @@ reranking:
 vector_store:
   collection_name: "doc_chunks"
   persist_dir: "data/chroma_db"
+
+evaluation:
+  # LLM-as-judge model for evaluation/evaluate_agent.py. Use a stronger model
+  # from a different family than llm.model to avoid self-preference bias.
+  # Override at runtime with --judge-model.
+  judge:
+    model: "openai/gpt-oss-120b"
+    base_url: "https://llm.scads.ai/v1"   # optional; defaults to llm.base_url
 
 logging:
   level: "INFO"

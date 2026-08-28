@@ -9,19 +9,26 @@ import uuid
 import streamlit as st
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from src.agent.actions import LLMActionSelector
 from src.agent.chitchat import LLMChitchatResponder
 from src.agent.context import ContextManager
-from src.agent.graph import build_agent_graph, invoke_agent_graph
+from src.agent.graph import (
+    build_agent_graph,
+    conversation_settings,
+    stream_agent_graph,
+)
+from src.agent.planner import LLMRetrievalPlanner
 from src.agent.relevance import LLMRelevanceGrader
 from src.agent.routes import LLMRetrievalGate
+from src.agent.summarizer import ConversationSummarizer
 from src.agent.support import LLMSupportVerifier
 from src.agent.tools.vector_retrieve import VectorRetrieveTool
 from src.agent.tools.web_search import WebSearchTool
 from src.core.config import PROJECT_ROOT, Config
 from src.core.logger import setup_logging
+from src.generation.response import RAGResponse
 from src.pipeline.query_runtime import build_query_pipeline
 from src.store.conversations import create_conversation, list_conversations
+from src.store.messages import SqliteConversationStore
 
 
 DB_PATH = PROJECT_ROOT / "data" / "checkpoints.sqlite"
@@ -48,8 +55,8 @@ def _get_or_create_visitor_id() -> str:
 
 
 @st.cache_resource(show_spinner="Loading models and index...")
-def _load_graph():
-    """Build the pipeline and compiled agent graph once per server process."""
+def _load_runtime():
+    """Build the graph, transcript store, and summarizer once per server process."""
     config = Config()
     setup_logging(config)
     pipeline = build_query_pipeline(config)
@@ -58,12 +65,12 @@ def _load_graph():
     connection = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     checkpointer = SqliteSaver(connection)
 
-    return build_agent_graph(
+    graph = build_agent_graph(
         pipeline,
         retrieval_gate=LLMRetrievalGate(pipeline.llm),
         context_manager=ContextManager(config),
         chitchat_responder=LLMChitchatResponder(pipeline.llm),
-        action_selector=LLMActionSelector(
+        retrieval_planner=LLMRetrievalPlanner(
             pipeline.llm,
             document_names=pipeline.hybrid_retriever.vector_store.get_indexed_sources(),
         ),
@@ -73,6 +80,9 @@ def _load_graph():
         web_search_tool=WebSearchTool(config),
         checkpointer=checkpointer,
     )
+    store = SqliteConversationStore(DB_PATH)
+    summarizer = ConversationSummarizer(pipeline.llm)
+    return graph, store, summarizer, conversation_settings(config)
 
 
 def _render_sidebar(owner_uid: str) -> None:
@@ -98,13 +108,23 @@ def _render_reasoning_trace(state: dict) -> None:
             f"(confidence {state.get('retrieval_confidence')})  \n{state.get('retrieval_reason')}"
         )
         st.markdown(
-            f"**Iterations used**: {state.get('iteration_count')} / {state.get('max_iterations')}"
+            f"**Retrieval rounds**: {state.get('retrieval_rounds')} / "
+            f"{state.get('max_retrieval_rounds')}"
         )
-        for index, entry in enumerate(state.get("scratchpad", []), start=1):
+        for entry in state.get("retrieval_history", []):
+            queries = "  \n".join(
+                f"- `{query.get('tool')}`: {query.get('query')}"
+                for query in entry.get("queries", [])
+            )
+            added = ", ".join(entry.get("added_chunk_ids", [])) or "none"
             st.markdown(
-                f"**Step {index}** (`{entry.get('action')}`): {entry.get('action_input')}  \n"
-                f"Thought: {entry.get('thought')}  \n"
-                f"Observation: {entry.get('fact')}"
+                f"**Round {entry.get('round')}**  \n{queries}  \n"
+                f"Relevant chunks added: {added}"
+            )
+        if state.get("support_status"):
+            st.markdown(
+                f"**Support check**: `{state.get('support_status')}` - "
+                f"{state.get('support_reason')}"
             )
 
 
@@ -128,20 +148,16 @@ def main() -> None:
     if "thread_id" not in st.session_state:
         st.session_state.thread_id = None
 
-    graph = _load_graph()
+    graph, store, summarizer, conv_settings = _load_runtime()
     _render_sidebar(owner_uid)
 
     st.title("Self-RAG Document QA")
 
     thread_id = st.session_state.thread_id
-    history = []
     if thread_id:
-        config = {"configurable": {"thread_id": thread_id}}
-        history = graph.get_state(config).values.get("conversation_history", [])
-
-    for message in history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+        for message in store.history(thread_id):
+            with st.chat_message(message.role):
+                st.markdown(message.content)
 
     question = st.chat_input("Ask a question...")
     if not question:
@@ -149,29 +165,56 @@ def main() -> None:
 
     if st.session_state.thread_id is None:
         st.session_state.thread_id = create_conversation(DB_PATH, owner_uid, question)
+    thread_id = st.session_state.thread_id
 
     with st.chat_message("user"):
         st.markdown(question)
 
     with st.chat_message("assistant"):
-        response = None
-        with st.spinner("Thinking..."):
-            try:
-                response = invoke_agent_graph(
-                    graph, question, thread_id=st.session_state.thread_id
-                )
-            except Exception as error:
-                st.error(f"Error: {error}")
-
+        response = _run_turn(
+            graph, store, summarizer, question, thread_id, conv_settings
+        )
         if response is not None:
-            st.markdown(response.answer)
             if response.sources:
                 st.caption("Sources: " + _format_sources(response.sources))
-            config = {"configurable": {"thread_id": st.session_state.thread_id}}
+            config = {"configurable": {"thread_id": thread_id}}
             _render_reasoning_trace(graph.get_state(config).values)
 
     if response is not None:
         st.rerun()
+
+
+def _run_turn(graph, store, summarizer, question: str, thread_id: str, conv_settings):
+    """Stream the answer into the chat message, returning the final RAGResponse."""
+    response_box: dict[str, RAGResponse] = {}
+
+    def token_stream():
+        for item in stream_agent_graph(
+            graph,
+            question,
+            thread_id=thread_id,
+            store=store,
+            summarizer=summarizer,
+            **conv_settings,
+        ):
+            if isinstance(item, RAGResponse):
+                response_box["response"] = item
+            else:
+                yield item
+
+    try:
+        streamed = st.write_stream(token_stream())
+    except Exception as error:  # noqa: BLE001 - surface any turn failure in the UI
+        st.error(f"Error: {error}")
+        return None
+
+    response = response_box.get("response")
+    if response is None:
+        return None
+    # chitchat / abstain paths stream no tokens; render their answer now.
+    if not streamed:
+        st.markdown(response.answer)
+    return response
 
 
 if __name__ == "__main__":

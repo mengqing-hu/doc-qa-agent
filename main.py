@@ -6,10 +6,10 @@ import argparse
 
 from langgraph.checkpoint.memory import InMemorySaver
 
-from src.agent.actions import LLMActionSelector
 from src.agent.chitchat import LLMChitchatResponder
 from src.agent.context import ContextManager
 from src.agent.graph import build_agent_graph, invoke_agent_graph
+from src.agent.planner import LLMRetrievalPlanner
 from src.agent.relevance import LLMRelevanceGrader
 from src.agent.routes import LLMRetrievalGate
 from src.agent.support import LLMSupportVerifier
@@ -18,6 +18,7 @@ from src.agent.tools.web_search import WebSearchTool
 from src.core.config import Config
 from src.core.logger import setup_logging
 from src.pipeline.query_runtime import build_query_pipeline
+from src.store.messages import InMemoryConversationStore
 
 
 def main() -> None:
@@ -31,7 +32,7 @@ def main() -> None:
         retrieval_gate=LLMRetrievalGate(pipeline.llm),
         context_manager=ContextManager(config),
         chitchat_responder=LLMChitchatResponder(pipeline.llm),
-        action_selector=LLMActionSelector(
+        retrieval_planner=LLMRetrievalPlanner(
             pipeline.llm,
             document_names=pipeline.hybrid_retriever.vector_store.get_indexed_sources(),
         ),
@@ -45,6 +46,7 @@ def main() -> None:
         graph,
         arguments.question,
         thread_id=arguments.thread_id,
+        store=InMemoryConversationStore(),
     )
 
     print(response.answer)

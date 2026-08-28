@@ -1,98 +1,50 @@
-"""Maintain bounded conversation context for query understanding."""
+"""Reset per-turn retrieval state at the start of each graph invocation.
+
+Conversation history no longer lives in the graph. The caller assembles a
+bounded window from the transcript store (``src/store/messages.py`` via
+``src/agent/context_window.py``) and passes it in as ``conversation_context`` /
+``conversation_summary``; this node does not touch it.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
-from src.agent.state import AgentState, ConversationMessage
+from src.agent.state import AgentState
 from src.core.config import Config
 
 
-DEFAULT_MAX_HISTORY_MESSAGES = 8
-DEFAULT_MAX_ITERATIONS = 4
+DEFAULT_MAX_RETRIEVAL_ROUNDS = 3
 
 
 class ContextManager:
-    """Store recent conversation messages in checkpoint-compatible state."""
+    """Prepare each turn's retrieval-loop state."""
 
     def __init__(self, config: Config) -> None:
-        """Read the conversation-history and iteration budget settings."""
-        self.max_history_messages = int(
+        """Read the retrieval-round budget."""
+        self.max_retrieval_rounds = int(
             config.get(
-                "agent",
-                "context",
-                "max_history_messages",
-                default=DEFAULT_MAX_HISTORY_MESSAGES,
+                "agent", "max_retrieval_rounds", default=DEFAULT_MAX_RETRIEVAL_ROUNDS
             )
         )
-        if self.max_history_messages <= 0:
-            raise ValueError("agent.context.max_history_messages must be greater than zero")
-        self.max_iterations = int(
-            config.get("agent", "max_iterations", default=DEFAULT_MAX_ITERATIONS)
-        )
-        if self.max_iterations <= 0:
-            raise ValueError("agent.max_iterations must be greater than zero")
+        if self.max_retrieval_rounds <= 0:
+            raise ValueError("agent.max_retrieval_rounds must be greater than zero")
 
     def prepare_query(self, state: AgentState) -> dict[str, Any]:
-        """Store the current user request and reset this turn's ReAct loop state."""
+        """Store the normalized question and reset this turn's retrieval state."""
         question = state["question"].strip()
         if not question:
             raise ValueError("question must not be empty")
 
-        history = _history_from_state(state)
         return {
             "original_query": question,
-            "conversation_context": history[-self.max_history_messages :],
-            "conversation_history": _trim_history(
-                [*history, {"role": "user", "content": question}],
-                self.max_history_messages,
-            ),
-            "iteration_count": 0,
-            "max_iterations": self.max_iterations,
-            "scratchpad": [],
+            "retrieval_rounds": 0,
+            "max_retrieval_rounds": self.max_retrieval_rounds,
+            "retrieval_plan": {"queries": [], "done": False, "reason": ""},
+            "ungraded_evidence": [],
+            "accumulated_evidence": [],
+            "retrieval_history": [],
+            "last_round_added_relevant": False,
+            "synthesis_attempts": 0,
+            "synthesis_truncated": False,
         }
-
-    def persist_response(self, state: AgentState) -> dict[str, list[ConversationMessage]]:
-        """Append the current user request and final response to conversation state."""
-        history = _history_from_state(state)
-        question = state["question"].strip()
-        response = state.get("response")
-        if not isinstance(response, Mapping) or not isinstance(response.get("answer"), str):
-            raise RuntimeError("Agent graph cannot persist an invalid response")
-
-        if not history or history[-1] != {"role": "user", "content": question}:
-            history.append({"role": "user", "content": question})
-        history.append({"role": "assistant", "content": response["answer"]})
-        return {
-            "conversation_history": _trim_history(
-                history,
-                self.max_history_messages,
-            )
-        }
-
-
-def _history_from_state(state: AgentState) -> list[ConversationMessage]:
-    """Read validated conversation messages from graph state."""
-    raw_history = state.get("conversation_history", [])
-    if not isinstance(raw_history, list):
-        raise RuntimeError("Conversation history must be a list")
-
-    history: list[ConversationMessage] = []
-    for message in raw_history:
-        if not isinstance(message, Mapping):
-            raise RuntimeError("Conversation history contains an invalid message")
-        role = message.get("role")
-        content = message.get("content")
-        if role not in {"user", "assistant"} or not isinstance(content, str):
-            raise RuntimeError("Conversation history contains an invalid message")
-        history.append({"role": role, "content": content})
-    return history
-
-
-def _trim_history(
-    history: list[ConversationMessage],
-    max_history_messages: int,
-) -> list[ConversationMessage]:
-    """Keep only the most recent bounded set of conversation messages."""
-    return history[-max_history_messages:]

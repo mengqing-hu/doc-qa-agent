@@ -38,44 +38,61 @@ class Evidence(TypedDict):
     score: float | None
 
 
-class ScratchpadEntry(TypedDict):
-    """Record one completed ReAct iteration: what was asked, found, and cited."""
+class PlannedQueryState(TypedDict):
+    """One retrieval the planner asked for, in a checkpoint-compatible format."""
 
-    thought: str
-    action: Literal["vector_retrieve", "web_search"]
-    action_input: str
-    fact: str
-    sources: list[SourceState]
+    query: str
+    tool: Literal["vector_retrieve", "web_search"]
+    metadata_filter: NotRequired[dict[str, str | list[str]] | None]
+
+
+class RetrievalPlanState(TypedDict):
+    """One round's plan: the queries to run and whether retrieval is complete."""
+
+    queries: list[PlannedQueryState]
+    done: bool
+    reason: str
+
+
+class RetrievalRound(TypedDict):
+    """A completed planning + gather round, kept for the trace and evaluation."""
+
+    round: int
+    queries: list[PlannedQueryState]
+    gathered_count: int
+    added_chunk_ids: list[str]
+    gather_errors: list[str]
 
 
 class AgentState(TypedDict):
-    """Represent the state shared by every ReAct + Self-RAG graph node."""
+    """Represent the state shared by every node of the flattened retrieval graph."""
 
     question: str
     retrieval_action: NotRequired[Literal["retrieve", "chitchat", "abstain"]]
     retrieval_confidence: NotRequired[float]
     retrieval_reason: NotRequired[str]
-    conversation_history: NotRequired[list[ConversationMessage]]
+    # The bounded window assembled from the transcript store by the caller; the
+    # graph never holds the full transcript.
     conversation_context: NotRequired[list[ConversationMessage]]
+    conversation_summary: NotRequired[str | None]
     original_query: NotRequired[str]
-    iteration_count: NotRequired[int]
-    max_iterations: NotRequired[int]
-    scratchpad: NotRequired[list[ScratchpadEntry]]
-    action: NotRequired[Literal["vector_retrieve", "web_search", "finish", "error"]]
-    action_input: NotRequired[str]
-    action_thought: NotRequired[str]
-    metadata_filter: NotRequired[dict[str, str | tuple[str, ...]] | None]
-    tool_attempts: NotRequired[int]
-    current_action: NotRequired[Literal["vector_retrieve", "web_search"]]
-    current_evidence: NotRequired[list[Evidence]]
-    relevance_status: NotRequired[Literal["relevant", "none", "error"]]
-    relevance_reason: NotRequired[str]
-    relevant_evidence: NotRequired[list[Evidence]]
-    current_fact: NotRequired[str | None]
-    current_sources: NotRequired[list[SourceState]]
+
+    retrieval_rounds: NotRequired[int]
+    max_retrieval_rounds: NotRequired[int]
+    retrieval_plan: NotRequired[RetrievalPlanState]
+    ungraded_evidence: NotRequired[list[Evidence]]
+    gather_errors: NotRequired[list[str]]
+    accumulated_evidence: NotRequired[list[Evidence]]
+    retrieval_history: NotRequired[list[RetrievalRound]]
+    last_round_added_relevant: NotRequired[bool]
+
+    synthesis_attempts: NotRequired[int]
+    synthesis_truncated: NotRequired[bool]
     support_status: NotRequired[
         Literal["supported", "partially_supported", "unsupported", "error"]
     ]
     support_reason: NotRequired[str]
+    support_claims: NotRequired[list[dict[str, Any]]]
+
     response: NotRequired[ResponseState]
     error: NotRequired[str | None]
