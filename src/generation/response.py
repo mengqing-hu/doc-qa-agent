@@ -21,3 +21,4 @@ class RAGResponse:
 
     answer: str
     sources: tuple[SourceReference, ...]
+    truncated: bool = False

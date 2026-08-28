@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from typing import Any
 
 from src.generation.llm import LLM
@@ -13,6 +14,11 @@ from src.retrieval.reranker import Reranker
 
 
 logger = logging.getLogger(__name__)
+CONTINUATION_INSTRUCTION = (
+    "\n\n# Answer so far (truncated)\n{partial}\n\n# Continue\n"
+    "Continue the answer from exactly where it stopped. Do not repeat any text "
+    "already written above and do not restate the question."
+)
 
 
 class RAGPipeline:
@@ -50,8 +56,9 @@ class RAGPipeline:
         max_context_characters: int | None = None,
         max_tokens: int | None = None,
         group_fairly_by_source: bool = False,
+        max_continuations: int = 0,
     ) -> RAGResponse:
-        """Generate a grounded answer from already retrieved evidence chunks."""
+        """Generate a grounded answer, continuing it if the model truncates."""
         normalized_query = _normalized_query(query)
         prompt = self.prompt_builder.build(
             normalized_query,
@@ -59,13 +66,39 @@ class RAGPipeline:
             max_context_characters=max_context_characters,
             group_fairly_by_source=group_fairly_by_source,
         )
-        answer = self.llm.generate(prompt, max_tokens=max_tokens)
+        answer, truncated = self.llm.generate_checked(prompt, max_tokens=max_tokens)
+        continuations = 0
+        while truncated and continuations < max_continuations:
+            continuations += 1
+            logger.info("Answer truncated; requesting continuation %d", continuations)
+            continuation_prompt = prompt + CONTINUATION_INSTRUCTION.format(partial=answer)
+            more, truncated = self.llm.generate_checked(
+                continuation_prompt, max_tokens=max_tokens
+            )
+            answer = f"{answer} {more}".strip()
+
         sources = tuple(_source_reference(chunk) for chunk in evidence_chunks)
-        logger.info(
-            "Answered question with %d retrieved source(s)",
-            len(sources),
+        logger.info("Answered question with %d retrieved source(s)", len(sources))
+        return RAGResponse(answer=answer, sources=sources, truncated=truncated)
+
+    def generate_stream(
+        self,
+        query: str,
+        evidence_chunks: list[dict[str, Any]],
+        *,
+        max_context_characters: int | None = None,
+        max_tokens: int | None = None,
+        group_fairly_by_source: bool = False,
+    ) -> Iterator[str]:
+        """Yield grounded answer text chunks as they are produced."""
+        normalized_query = _normalized_query(query)
+        prompt = self.prompt_builder.build(
+            normalized_query,
+            evidence_chunks,
+            max_context_characters=max_context_characters,
+            group_fairly_by_source=group_fairly_by_source,
         )
-        return RAGResponse(answer=answer, sources=sources)
+        yield from self.llm.stream(prompt, max_tokens=max_tokens)
 
 
 def _normalized_query(query: str) -> str:

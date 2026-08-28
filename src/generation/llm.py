@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterator
 from typing import Any
 
 from openai import OpenAI, OpenAIError
@@ -53,6 +54,13 @@ class LLM:
 
     def generate(self, prompt: str, *, max_tokens: int | None = None) -> str:
         """Return one non-empty chat completion for a rendered prompt."""
+        answer, _ = self.generate_checked(prompt, max_tokens=max_tokens)
+        return answer
+
+    def generate_checked(
+        self, prompt: str, *, max_tokens: int | None = None
+    ) -> tuple[str, bool]:
+        """Return ``(answer, truncated)`` where ``truncated`` means finish_reason == 'length'."""
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
         token_limit = self.max_tokens if max_tokens is None else int(max_tokens)
@@ -65,18 +73,53 @@ class LLM:
         if content is None or not content.strip():
             raise RuntimeError("LLM response did not contain answer text")
 
-        finish_reason = completion.choices[0].finish_reason if completion.choices else None
-        if finish_reason == "length":
+        finish_reason = (
+            completion.choices[0].finish_reason if completion.choices else None
+        )
+        truncated = finish_reason == "length"
+        if truncated:
             logger.warning(
                 "LLM response for model %s was truncated by max_tokens=%d; "
-                "the answer may be incomplete",
+                "a continuation may be needed",
                 self.model,
                 token_limit,
             )
 
         answer = content.strip()
         logger.info("Generated answer with %d character(s)", len(answer))
-        return answer
+        return answer, truncated
+
+    def stream(
+        self, prompt: str, *, max_tokens: int | None = None
+    ) -> Iterator[str]:
+        """Yield answer text chunks as the model produces them.
+
+        Streaming skips the transient-failure retry that ``generate`` has; a
+        streaming call that fails should be retried by the caller.
+        """
+        if not prompt.strip():
+            raise ValueError("prompt must not be empty")
+        token_limit = self.max_tokens if max_tokens is None else int(max_tokens)
+        if token_limit <= 0:
+            raise ValueError("max_tokens must be greater than zero")
+
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+                max_tokens=token_limit,
+                stream=True,
+            )
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    yield delta
+        except OpenAIError as error:
+            logger.exception("Streaming LLM request failed for model %s", self.model)
+            raise RuntimeError("Streaming LLM request failed") from error
 
     def _create_completion_with_retry(self, prompt: str, token_limit: int) -> Any:
         """Retry a transient LLM request failure with exponential backoff.
