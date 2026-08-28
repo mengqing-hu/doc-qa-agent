@@ -14,6 +14,9 @@ from src.generation.llm import LLM
 
 logger = logging.getLogger(__name__)
 RelevanceLabel = Literal["relevant", "irrelevant"]
+# One JSON object per graded chunk; a dozen-plus chunks per round overruns the
+# LLM's default 512-token cap, which truncates the JSON and fails parsing.
+DEFAULT_RELEVANCE_MAX_TOKENS = 2048
 CODE_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 RELEVANCE_GRADER_PROMPT = """You are the passage relevance grader for a document question-answering system.
 
@@ -26,7 +29,11 @@ about", "summarize", or "give an overview", keep complementary passages that
 describe the document's topic, objectives, approach, and main findings. Prefer
 retaining several related passages over selecting only the single best match.
 Mark a passage irrelevant only when it has no meaningful contribution or
-discusses a different entity, task, or experiment. For a narrowly scoped
+discusses a different entity, task, or experiment. Treat obvious surface
+variants of the same name as one entity (differences in abbreviation, spacing
+or hyphenation, capitalization, word order, or an added or dropped numeric or
+version qualifier) - do not mark a passage irrelevant only because it uses a
+slightly different form of the name. For a narrowly scoped
 question, require evidence or an interpretation that directly helps answer
 that question; do not retain a glossary, generic background, or future-work
 passage merely because it shares the same domain vocabulary. Do not judge
@@ -107,9 +114,14 @@ class RelevanceDecision:
 class LLMRelevanceGrader:
     """Select retrieved passages that are relevant to a user question."""
 
-    def __init__(self, llm: LLM) -> None:
+    def __init__(
+        self, llm: LLM, *, max_tokens: int = DEFAULT_RELEVANCE_MAX_TOKENS
+    ) -> None:
         """Store the configured LLM used to grade retrieved passages."""
         self.llm = llm
+        if max_tokens <= 0:
+            raise ValueError("relevance max_tokens must be greater than zero")
+        self.max_tokens = max_tokens
 
     def grade(
         self,
@@ -137,14 +149,14 @@ class LLMRelevanceGrader:
         available_chunk_ids = {
             item["chunk_id"] for item in chunk_payload if item["chunk_id"]
         }
-        raw_response = self.llm.generate(prompt)
+        raw_response = self._generate(prompt)
         try:
             return _parse_relevance_decision(
                 raw_response,
                 available_chunk_ids=available_chunk_ids,
             )
         except RuntimeError as first_error:
-            repaired_response = self.llm.generate(
+            repaired_response = self._generate(
                 RELEVANCE_JSON_REPAIR_PROMPT.format(
                     response=raw_response,
                     chunk_ids=json.dumps(sorted(available_chunk_ids), ensure_ascii=False),
@@ -169,6 +181,15 @@ class LLMRelevanceGrader:
                         f"a repair attempt: {second_error}"
                     ),
                 )
+
+    def _generate(self, prompt: str) -> str:
+        """Generate grader output, tolerating simple test doubles without max_tokens."""
+        try:
+            return self.llm.generate(prompt, max_tokens=self.max_tokens)
+        except TypeError as error:
+            if "max_tokens" not in str(error):
+                raise
+            return self.llm.generate(prompt)
 
 
 def _parse_relevance_decision(
